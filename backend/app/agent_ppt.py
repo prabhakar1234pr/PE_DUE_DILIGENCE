@@ -591,13 +591,13 @@ def _normalize_slides(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for idx, s in enumerate(slides, 1):
         out.append({
             "slide_number": idx,
-            "slide_type": s.get("slide_type", "content"),
-            "title": s.get("title", f"Slide {idx}"),
-            "subtitle": s.get("subtitle", ""),
-            "bullets": s.get("bullets", [])[:8],
-            "key_stat": s.get("key_stat", ""),
-            "source_ids": s.get("source_ids", [])[:8],
-            "dashboard_metrics": s.get("dashboard_metrics", [])[:6],
+            "slide_type": s.get("slide_type") or "content",
+            "title": s.get("title") or f"Slide {idx}",
+            "subtitle": s.get("subtitle") or "",
+            "bullets": [b for b in (s.get("bullets") or []) if b][:8],
+            "key_stat": s.get("key_stat") or "",
+            "source_ids": [sid for sid in (s.get("source_ids") or []) if sid][:8],
+            "dashboard_metrics": (s.get("dashboard_metrics") or [])[:6],
         })
     return out[:24]
 

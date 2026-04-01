@@ -20,11 +20,19 @@ class SourceItem(BaseModel):
 class SlideItem(BaseModel):
     slide_number: int
     title: str
-    subtitle: str = ""
-    bullets: list[str]
-    key_stat: str = ""
+    subtitle: str | None = ""
+    bullets: list[str] = Field(default_factory=list)
+    key_stat: str | None = ""
+    slide_type: str = "content"
     source_ids: list[int] = Field(default_factory=list)
     dashboard_metrics: list[dict] = Field(default_factory=list)
+
+    def model_post_init(self, __context: object) -> None:
+        # Coerce None to empty string so frontend never sees null
+        if self.subtitle is None:
+            self.subtitle = ""
+        if self.key_stat is None:
+            self.key_stat = ""
 
 
 class ResearchResponse(BaseModel):
