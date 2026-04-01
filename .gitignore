@@ -6,5 +6,6 @@ extracted_text.txt
 page_*.png
 
 backend/app/__pycache__/
+backend/tests/__pycache__/
 backend/generated/
 backend/.venv/
