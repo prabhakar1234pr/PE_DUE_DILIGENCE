@@ -1,8 +1,19 @@
 @import "tailwindcss";
+@import "reveal.js/reveal.css";
+@import "reveal.js/theme/black.css";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #060b18;
+  --foreground: #e8eaf0;
+  --navy: #0a1628;
+  --navy-light: #12233c;
+  --navy-card: #14264a;
+  --gold: #c9a84c;
+  --gold-dim: #a68a3a;
+  --accent-teal: #38bda9;
+  --accent-red: #dc5050;
+  --slate-border: #1e3050;
+  --text-muted: #8896b0;
 }
 
 @theme inline {
@@ -12,40 +23,156 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
 }
 
+/* ── Reveal.js overrides ────────────────────────────────────── */
 .reveal {
-  height: 520px;
+  height: 600px;
+  width: 100%;
 }
 
 .reveal .slides section {
   text-align: left;
   color: #ffffff;
-  font-size: 28px;
+  font-size: 22px;
+  padding: 30px 40px;
+  background: linear-gradient(135deg, #0a1628 0%, #12233c 100%);
+  border-radius: 4px;
+}
+
+.reveal .slides section .slide-header {
+  border-bottom: 2px solid var(--gold);
+  padding-bottom: 12px;
+  margin-bottom: 20px;
 }
 
 .reveal .slides section h3 {
-  font-size: 44px;
-  margin-bottom: 8px;
+  font-size: 32px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  letter-spacing: -0.01em;
 }
 
 .reveal .slides section h5 {
-  font-size: 24px;
-  color: #f5cc71;
-  margin-bottom: 14px;
+  font-size: 18px;
+  color: var(--gold);
+  font-weight: 500;
+  margin-bottom: 0;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .reveal .slides section ul {
-  margin-left: 24px;
+  margin-left: 0;
+  list-style: none;
+  padding: 0;
+}
+
+.reveal .slides section ul li {
+  position: relative;
+  padding-left: 22px;
+  margin-bottom: 10px;
+  line-height: 1.5;
+  font-size: 19px;
+  color: #cbd5e8;
+}
+
+.reveal .slides section ul li::before {
+  content: "\25B8";
+  position: absolute;
+  left: 0;
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.reveal .slides section .key-stat-box {
+  margin-top: 18px;
+  padding: 12px 18px;
+  border-left: 3px solid var(--gold);
+  background: rgba(201, 168, 76, 0.08);
+  border-radius: 0 6px 6px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--gold);
+}
+
+.reveal .slides section .metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.reveal .slides section .metric-card {
+  background: var(--navy-card);
+  border: 1px solid var(--slate-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.reveal .slides section .metric-card .metric-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--gold);
+  margin-bottom: 4px;
+}
+
+.reveal .slides section .metric-card .metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.reveal .slides section .metric-card .metric-trend {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.reveal .slides section .metric-card .metric-trend.up { color: var(--accent-teal); }
+.reveal .slides section .metric-card .metric-trend.down { color: var(--accent-red); }
+.reveal .slides section .metric-card .metric-trend.flat { color: var(--text-muted); }
+
+.reveal .slides section .source-pills {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--navy);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--slate-border);
+  border-radius: 3px;
+}
+
+/* ── Animations ──────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, var(--navy-light) 25%, var(--navy-card) 50%, var(--navy-light) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.8s ease-in-out infinite;
 }
