@@ -24,6 +24,7 @@ class SlideItem(BaseModel):
     bullets: list[str]
     key_stat: str = ""
     source_ids: list[int] = Field(default_factory=list)
+    dashboard_metrics: list[dict] = Field(default_factory=list)
 
 
 class ResearchResponse(BaseModel):

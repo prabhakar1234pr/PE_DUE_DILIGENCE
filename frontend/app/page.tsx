@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Reveal from "reveal.js";
+import Reveal, { type RevealApi } from "reveal.js";
 
 type Source = {
   id: number;
@@ -17,6 +17,7 @@ type Slide = {
   bullets: string[];
   key_stat: string;
   source_ids: number[];
+  dashboard_metrics?: { label: string; value: string; trend: string }[];
 };
 
 type ApiResponse = {
@@ -38,7 +39,7 @@ export default function Home() {
   const [result, setResult] = useState<ApiResponse | null>(null);
   const [selectedSource, setSelectedSource] = useState<number | null>(null);
   const revealRootRef = useRef<HTMLDivElement>(null);
-  const revealInstanceRef = useRef<any>(null);
+  const revealInstanceRef = useRef<RevealApi | null>(null);
   const previewContainerRef = useRef<HTMLDivElement>(null);
 
   const sourceMap = useMemo(() => {
@@ -178,6 +179,15 @@ export default function Home() {
                   <p>
                     <strong>{slide.key_stat}</strong>
                   </p>
+                  {slide.dashboard_metrics && slide.dashboard_metrics.length > 0 ? (
+                    <div>
+                      {slide.dashboard_metrics.slice(0, 4).map((metric, idx) => (
+                        <p key={`${slide.slide_number}-metric-${idx}`}>
+                          {metric.label}: {metric.value} ({metric.trend})
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                   <p>
                     Sources:{" "}
                     {slide.source_ids.map((id) => (
