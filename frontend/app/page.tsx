@@ -39,6 +39,12 @@ type ApiResponse = {
 
 type AgentStatus = "idle" | "running" | "done" | "error";
 
+type StreamEvent = {
+  type: "thinking" | "search" | "source" | "progress" | "attempt" | "slides" | "done" | "error";
+  data: string;
+  timestamp: number;
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 /* ─── Small SVG Icons (inline to avoid deps) ────────────────── */
@@ -133,6 +139,122 @@ function AgentStatusBadge({ status }: { status: AgentStatus }) {
   );
 }
 
+/* ─── Thinking Feed Component ───────────────────────────────── */
+
+function ThinkingFeed({ events }: { events: StreamEvent[] }) {
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
+  }, [events]);
+
+  if (events.length === 0) return null;
+
+  return (
+    <div
+      ref={feedRef}
+      className="flex flex-col gap-1 overflow-y-auto max-h-[320px] px-1 text-xs font-mono"
+    >
+      {events.map((ev, i) => {
+        const time = new Date(ev.timestamp).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+
+        if (ev.type === "thinking") {
+          return (
+            <div key={i} className="flex gap-2 py-1 text-purple-300/90">
+              <span className="shrink-0 text-purple-500/60">{time}</span>
+              <span className="shrink-0 text-purple-400">{"\u{1F9E0}"}</span>
+              <span className="leading-relaxed">{ev.data}</span>
+            </div>
+          );
+        }
+        if (ev.type === "search") {
+          return (
+            <div key={i} className="flex gap-2 py-1 text-sky-300/90">
+              <span className="shrink-0 text-sky-500/60">{time}</span>
+              <span className="shrink-0 text-sky-400">{"\u{1F50D}"}</span>
+              <span>
+                Searching: <span className="text-sky-200 font-semibold">{ev.data}</span>
+              </span>
+            </div>
+          );
+        }
+        if (ev.type === "source") {
+          let parsed: { title?: string; url?: string } = {};
+          try {
+            parsed = JSON.parse(ev.data);
+          } catch {
+            parsed = { title: ev.data, url: "" };
+          }
+          return (
+            <div key={i} className="flex gap-2 py-1 text-emerald-300/90">
+              <span className="shrink-0 text-emerald-500/60">{time}</span>
+              <span className="shrink-0 text-emerald-400">{"\u{1F310}"}</span>
+              <span className="truncate">
+                Found: <span className="text-emerald-200">{parsed.title || parsed.url}</span>
+                {parsed.url && (
+                  <span className="ml-1.5 text-emerald-500/60 text-[10px]">{parsed.url}</span>
+                )}
+              </span>
+            </div>
+          );
+        }
+        if (ev.type === "attempt") {
+          let parsed: { attempt?: number; score?: number; issues?: string[] } = {};
+          try {
+            parsed = JSON.parse(ev.data);
+          } catch {
+            /* ignore */
+          }
+          const scoreColor =
+            (parsed.score ?? 0) >= 85
+              ? "text-emerald-400"
+              : (parsed.score ?? 0) >= 70
+                ? "text-amber-400"
+                : "text-red-400";
+          return (
+            <div key={i} className="flex gap-2 py-1.5 text-[var(--text-muted)]">
+              <span className="shrink-0 text-[var(--text-muted)]/60">{time}</span>
+              <span className="shrink-0">{"\u{1F4CA}"}</span>
+              <span>
+                Attempt {parsed.attempt}: score{" "}
+                <span className={`font-bold ${scoreColor}`}>{parsed.score}/100</span>
+                {parsed.issues && parsed.issues.length > 0 && (
+                  <span className="text-amber-400/70"> ({parsed.issues.length} issues)</span>
+                )}
+              </span>
+            </div>
+          );
+        }
+        if (ev.type === "progress" || ev.type === "slides") {
+          return (
+            <div key={i} className="flex gap-2 py-1 text-[var(--gold)]/80">
+              <span className="shrink-0 text-[var(--gold)]/40">{time}</span>
+              <span className="shrink-0">{ev.type === "slides" ? "\u{1F4CA}" : "\u{2699}\u{FE0F}"}</span>
+              <span className="font-medium">{ev.data}</span>
+            </div>
+          );
+        }
+        if (ev.type === "error") {
+          return (
+            <div key={i} className="flex gap-2 py-1 text-red-400">
+              <span className="shrink-0 text-red-500/60">{time}</span>
+              <span className="shrink-0">{"\u274C"}</span>
+              <span>{ev.data}</span>
+            </div>
+          );
+        }
+        return null;
+      })}
+    </div>
+  );
+}
+
 /* ─── Trend Arrow Helper ────────────────────────────────────── */
 
 function trendDisplay(trend: string) {
@@ -152,6 +274,7 @@ export default function Home() {
   const [result, setResult] = useState<ApiResponse | null>(null);
   const [selectedSource, setSelectedSource] = useState<number | null>(null);
   const [currentSlideIdx, setCurrentSlideIdx] = useState(0);
+  const [streamEvents, setStreamEvents] = useState<StreamEvent[]>([]);
 
   const revealRootRef = useRef<HTMLDivElement>(null);
   const revealInstanceRef = useRef<InstanceType<typeof Reveal> | null>(null);
@@ -235,30 +358,93 @@ export default function Home() {
     setResult(null);
     setSelectedSource(null);
     setCurrentSlideIdx(0);
+    setStreamEvents([]);
     setStatus1("running");
     setStatus2("idle");
 
+    const addEvent = (type: StreamEvent["type"], data: string) => {
+      setStreamEvents((prev) => [...prev, { type, data, timestamp: Date.now() }]);
+    };
+
     try {
-      const response = await fetch(`${API_URL}/api/research`, {
+      const response = await fetch(`${API_URL}/api/research/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ company: name }),
       });
-      setStatus1("done");
-      setStatus2("running");
 
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || "Failed to generate report.");
+        throw new Error(payload.detail || "Failed to start research stream.");
       }
 
-      const payload = (await response.json()) as ApiResponse;
-      setResult(payload);
-      setStatus2("done");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No response body");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEventType = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEventType = line.slice(7).trim();
+          } else if (line.startsWith("data: ") && currentEventType) {
+            const rawData = line.slice(6);
+            try {
+              const parsed = JSON.parse(rawData);
+
+              if (currentEventType === "done") {
+                // Final result — same shape as /api/research response
+                setResult(parsed as ApiResponse);
+                setStatus1("done");
+                setStatus2("done");
+                addEvent("progress", "Report complete!");
+              } else if (currentEventType === "slides") {
+                setStatus1("done");
+                setStatus2("running");
+                addEvent("slides", typeof parsed === "string" ? parsed : "Building slides...");
+              } else if (currentEventType === "error") {
+                addEvent("error", typeof parsed === "string" ? parsed : "Unknown error");
+              } else if (currentEventType === "source") {
+                // Source data is already an object, stringify for the feed
+                addEvent("source", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+              } else if (currentEventType === "attempt") {
+                addEvent("attempt", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+              } else {
+                addEvent(
+                  currentEventType as StreamEvent["type"],
+                  typeof parsed === "string" ? parsed : JSON.stringify(parsed)
+                );
+              }
+            } catch {
+              // raw string data
+              addEvent(currentEventType as StreamEvent["type"], rawData);
+            }
+            currentEventType = "";
+          }
+        }
+      }
+
+      // If we never got a "done" event, something went wrong
+      if (!result) {
+        // Check if status was already set
+        setStatus1((prev) => (prev === "done" ? prev : "error"));
+        setStatus2((prev) => (prev === "done" ? prev : "error"));
+      }
     } catch (err) {
       setStatus1((prev) => (prev === "done" ? "done" : "error"));
       setStatus2("error");
-      setError(err instanceof Error ? err.message : "Unknown error");
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setError(msg);
+      addEvent("error", msg);
     } finally {
       setLoading(false);
     }
@@ -454,27 +640,39 @@ export default function Home() {
               )}
 
               {loading && !result && (
-                /* Loading skeleton */
-                <div className="flex h-full flex-col items-center justify-center gap-6" style={{ minHeight: 500 }}>
-                  <div className="w-full max-w-xl space-y-4">
-                    <div className="h-8 w-3/4 rounded skeleton-shimmer" />
-                    <div className="h-5 w-1/2 rounded skeleton-shimmer" />
-                    <div className="mt-6 space-y-3">
-                      <div className="h-4 w-full rounded skeleton-shimmer" />
-                      <div className="h-4 w-5/6 rounded skeleton-shimmer" />
-                      <div className="h-4 w-4/6 rounded skeleton-shimmer" />
-                      <div className="h-4 w-full rounded skeleton-shimmer" />
-                      <div className="h-4 w-3/4 rounded skeleton-shimmer" />
+                /* Live thinking feed + skeleton */
+                <div className="flex h-full flex-col gap-4" style={{ minHeight: 500 }}>
+                  {streamEvents.length > 0 ? (
+                    <div className="flex flex-1 flex-col rounded-lg border border-[var(--slate-border)] bg-[var(--navy-light)] overflow-hidden">
+                      <div className="flex items-center gap-2 border-b border-[var(--slate-border)] px-4 py-2.5">
+                        <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse-dot" />
+                        <span className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+                          Live Agent Thinking
+                        </span>
+                        <span className="ml-auto text-[10px] text-[var(--text-muted)]">
+                          {streamEvents.length} events
+                        </span>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-3">
+                        <ThinkingFeed events={streamEvents} />
+                      </div>
                     </div>
-                    <div className="mt-6 grid grid-cols-3 gap-3">
-                      <div className="h-16 rounded-lg skeleton-shimmer" />
-                      <div className="h-16 rounded-lg skeleton-shimmer" />
-                      <div className="h-16 rounded-lg skeleton-shimmer" />
+                  ) : (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-6">
+                      <div className="w-full max-w-xl space-y-4">
+                        <div className="h-8 w-3/4 rounded skeleton-shimmer" />
+                        <div className="h-5 w-1/2 rounded skeleton-shimmer" />
+                        <div className="mt-6 space-y-3">
+                          <div className="h-4 w-full rounded skeleton-shimmer" />
+                          <div className="h-4 w-5/6 rounded skeleton-shimmer" />
+                          <div className="h-4 w-4/6 rounded skeleton-shimmer" />
+                        </div>
+                      </div>
+                      <p className="text-sm text-[var(--text-muted)]">
+                        Connecting to research agent...
+                      </p>
                     </div>
-                  </div>
-                  <p className="text-sm text-[var(--text-muted)]">
-                    Running deep diligence analysis... this typically takes 45-90 seconds
-                  </p>
+                  )}
                 </div>
               )}
 

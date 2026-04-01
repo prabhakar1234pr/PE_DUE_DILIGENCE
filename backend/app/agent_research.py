@@ -681,3 +681,169 @@ def run_research(company: str) -> dict[str, Any]:
         feedback = " ; ".join(issues)
 
     return best_data or _mock_research(company)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Streaming research with chain-of-thought + grounding visibility
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_stream_sources(candidate: Any) -> list[dict[str, str]]:
+    """Extract grounding sources from a streaming candidate chunk."""
+    grounding = getattr(candidate, "grounding_metadata", None)
+    if not grounding:
+        return []
+    chunks = getattr(grounding, "grounding_chunks", None) or []
+    sources = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        web = getattr(chunk, "web", None)
+        if web and getattr(web, "uri", None) and web.uri not in seen:
+            seen.add(web.uri)
+            sources.append({"title": getattr(web, "title", ""), "url": web.uri})
+
+    queries = getattr(grounding, "web_search_queries", None) or []
+    return sources, list(queries) if queries else []
+
+
+def _extract_thinking(candidate: Any) -> str:
+    """Extract thinking/thought text from a candidate."""
+    content = getattr(candidate, "content", None)
+    if not content:
+        return ""
+    parts = getattr(content, "parts", None) or []
+    thoughts = []
+    for part in parts:
+        if getattr(part, "thought", False) and getattr(part, "text", None):
+            thoughts.append(part.text)
+    return " ".join(thoughts)
+
+
+def run_research_stream(company: str):
+    """Generator that yields SSE event dicts during research.
+
+    Event types:
+      {"event": "thinking", "data": "thought text..."}
+      {"event": "search",   "data": "query string"}
+      {"event": "source",   "data": {"title": "...", "url": "..."}}
+      {"event": "progress", "data": "status message"}
+      {"event": "attempt",  "data": {"attempt": 1, "score": 85, "issues": [...]}}
+      {"event": "done",     "data": <full research dict>}
+      {"event": "error",    "data": "error message"}
+    """
+    if settings.mock_mode or not settings.gemini_api_key:
+        yield {"event": "progress", "data": "Running in mock mode..."}
+        yield {"event": "thinking", "data": f"Generating mock research data for {company}..."}
+        import time
+        time.sleep(0.5)
+        yield {"event": "search", "data": f"{company} company overview"}
+        time.sleep(0.3)
+        yield {"event": "search", "data": f"{company} funding valuation"}
+        time.sleep(0.3)
+        mock = _mock_research(company)
+        for src in mock["all_sources"][:6]:
+            yield {"event": "source", "data": {"title": src["title"], "url": src["url"]}}
+            time.sleep(0.1)
+        yield {"event": "progress", "data": "Mock research complete."}
+        yield {"event": "done", "data": mock}
+        return
+
+    client = genai.Client(api_key=settings.gemini_api_key)
+    feedback = ""
+    best_data: dict[str, Any] | None = None
+    best_score = -1
+    cumulative_sources: list[dict[str, Any]] = []
+    seen_search_queries: set[str] = set()
+    seen_source_urls: set[str] = set()
+
+    max_attempts = max(1, settings.research_max_attempts)
+
+    for attempt in range(max_attempts):
+        yield {"event": "progress", "data": f"Research attempt {attempt + 1}/{max_attempts}..."}
+
+        prompt = _build_research_prompt(company, feedback)
+
+        try:
+            stream = client.models.generate_content_stream(
+                model=settings.gemini_research_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.1,
+                ),
+            )
+        except Exception as e:
+            yield {"event": "error", "data": f"API call failed: {e}"}
+            continue
+
+        full_text_parts: list[str] = []
+        last_response = None
+
+        for chunk in stream:
+            last_response = chunk
+
+            # Extract thinking from candidates
+            candidates = getattr(chunk, "candidates", None) or []
+            for candidate in candidates:
+                # Thinking text
+                thought = _extract_thinking(candidate)
+                if thought:
+                    yield {"event": "thinking", "data": thought}
+
+                # Regular text
+                content = getattr(candidate, "content", None)
+                if content:
+                    for part in getattr(content, "parts", None) or []:
+                        if not getattr(part, "thought", False) and getattr(part, "text", None):
+                            full_text_parts.append(part.text)
+
+                # Grounding sources
+                try:
+                    sources_data, queries = _extract_stream_sources(candidate)
+                    for q in queries:
+                        if q not in seen_search_queries:
+                            seen_search_queries.add(q)
+                            yield {"event": "search", "data": q}
+                    for src in sources_data:
+                        if src["url"] not in seen_source_urls:
+                            seen_source_urls.add(src["url"])
+                            yield {"event": "source", "data": src}
+                except Exception:
+                    pass
+
+        raw = "".join(full_text_parts)
+        if not raw:
+            feedback = "EMPTY response. Return COMPLETE JSON with all 16 sections."
+            yield {"event": "progress", "data": "Empty response, retrying..."}
+            continue
+
+        try:
+            data = _normalize_research(_parse_json_text(raw))
+        except Exception:
+            feedback = "INVALID JSON. Return strict JSON only."
+            yield {"event": "progress", "data": "Invalid JSON response, retrying..."}
+            continue
+
+        # Extract sources from last response
+        if last_response:
+            batch_sources = _extract_sources(last_response)
+            cumulative_sources = _merge_sources(cumulative_sources, batch_sources)
+        if not cumulative_sources:
+            cumulative_sources = _mock_research(company)["all_sources"]
+        data["all_sources"] = cumulative_sources
+
+        ok, issues, sc = _evaluate_research_quality(data)
+        yield {"event": "attempt", "data": {"attempt": attempt + 1, "score": sc, "issues": issues}}
+
+        if sc > best_score:
+            best_score = sc
+            best_data = data
+        if ok:
+            yield {"event": "progress", "data": f"Research passed quality check (score: {sc}/100)"}
+            yield {"event": "done", "data": data}
+            return
+        feedback = " ; ".join(issues)
+        yield {"event": "progress", "data": f"Score {sc}/100 — retrying with feedback..."}
+
+    final = best_data or _mock_research(company)
+    yield {"event": "progress", "data": f"Using best result (score: {best_score}/100)"}
+    yield {"event": "done", "data": final}
