@@ -24,3 +24,28 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.reveal {
+  height: 520px;
+}
+
+.reveal .slides section {
+  text-align: left;
+  color: #ffffff;
+  font-size: 28px;
+}
+
+.reveal .slides section h3 {
+  font-size: 44px;
+  margin-bottom: 8px;
+}
+
+.reveal .slides section h5 {
+  font-size: 24px;
+  color: #f5cc71;
+  margin-bottom: 14px;
+}
+
+.reveal .slides section ul {
+  margin-left: 24px;
+}

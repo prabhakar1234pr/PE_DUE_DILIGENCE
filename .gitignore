@@ -1,0 +1,10 @@
+.claude/
+PE_due_diligence.pdf
+extract_pdf.py
+extract_pdf2.py
+extracted_text.txt
+page_*.png
+
+backend/app/__pycache__/
+backend/generated/
+backend/.venv/
