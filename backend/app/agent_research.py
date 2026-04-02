@@ -105,12 +105,22 @@ Consider the company type:
 - AI/tech company → needs technical moat analysis, model benchmarks, GPU strategy
 - Regulated industry → needs compliance deep-dive, regulatory risk
 
+CRITICAL: Each topic MUST include a "section_key" from this EXACT list:
+  company_profile, management_team, product_and_technology, business_model,
+  unit_economics, financial_signals, customer_evidence, market_and_competition,
+  comparable_transactions, risk_and_regulatory, exit_and_investment
+
+You MUST cover ALL 11 section_keys at least once. You can have multiple topics
+for the same section_key (e.g., two topics for financial_signals: one for funding
+rounds, one for revenue metrics). But every section_key must appear.
+
 Return STRICT JSON:
 {{
   "company_type": "public|late_private|early_private|other",
   "research_plan": [
     {{
-      "topic": "short topic name",
+      "section_key": "one of the 11 keys above",
+      "topic": "descriptive topic name for this search",
       "search_query": "what to search for on Google",
       "data_to_extract": "specific data points to find",
       "priority": "critical|high|medium",
@@ -120,7 +130,7 @@ Return STRICT JSON:
   "rationale": "1-2 sentences on why this plan fits this company"
 }}
 
-Generate 8-15 research topics. Put the most important ones first.
+Generate 10-15 research topics. Put the most important ones first.
 Tailor the plan specifically to {company} — do NOT use a generic template."""
 
 
@@ -144,16 +154,17 @@ def _create_research_plan(client, company: str) -> list[dict[str, Any]]:
 def _default_plan(company: str) -> list[dict[str, Any]]:
     """Fallback plan if LLM planning fails."""
     return [
-        {"topic": "Company Overview", "search_query": f"{company} company overview founding headquarters employees", "data_to_extract": "founding year, HQ, employee count, key facts", "priority": "critical", "depth": "deep"},
-        {"topic": "Leadership Team", "search_query": f"{company} CEO CTO CFO leadership team background", "data_to_extract": "named executives, titles, prior companies, achievements", "priority": "critical", "depth": "deep"},
-        {"topic": "Products & Technology", "search_query": f"{company} products technology platform features", "data_to_extract": "core products, technical moat, patents, differentiation", "priority": "critical", "depth": "deep"},
-        {"topic": "Funding & Financials", "search_query": f"{company} funding rounds valuation revenue ARR investors", "data_to_extract": "funding rounds, investors, valuation, ARR, burn rate", "priority": "critical", "depth": "deep"},
-        {"topic": "Business Model", "search_query": f"{company} pricing business model revenue customers", "data_to_extract": "pricing tiers, ACV, revenue composition, customer segments", "priority": "high", "depth": "standard"},
-        {"topic": "Market & Competition", "search_query": f"{company} competitors market size industry landscape", "data_to_extract": "TAM/SAM/SOM, named competitors, market trends", "priority": "high", "depth": "deep"},
-        {"topic": "Customers & Traction", "search_query": f"{company} customers case studies reviews NPS retention", "data_to_extract": "customer logos, churn, NPS, case studies with ROI", "priority": "high", "depth": "standard"},
-        {"topic": "Comparable Transactions", "search_query": f"{company} sector M&A acquisitions comparable valuations", "data_to_extract": "M&A comps, public comps with multiples", "priority": "high", "depth": "standard"},
-        {"topic": "Risks & Regulatory", "search_query": f"{company} risks regulatory compliance IP patents", "data_to_extract": "key risks, regulatory status, IP exposure", "priority": "medium", "depth": "standard"},
-        {"topic": "Exit & Investment Thesis", "search_query": f"{company} IPO acquisition exit investment outlook", "data_to_extract": "exit paths, strategic acquirers, IPO readiness", "priority": "medium", "depth": "standard"},
+        {"section_key": "company_profile", "topic": "Company Overview", "search_query": f"{company} company overview founding headquarters employees", "data_to_extract": "founding year, HQ, employee count, key facts", "priority": "critical", "depth": "deep"},
+        {"section_key": "management_team", "topic": "Leadership Team", "search_query": f"{company} CEO CTO CFO leadership team background", "data_to_extract": "named executives, titles, prior companies, achievements", "priority": "critical", "depth": "deep"},
+        {"section_key": "product_and_technology", "topic": "Products & Technology", "search_query": f"{company} products technology platform features", "data_to_extract": "core products, technical moat, patents, differentiation", "priority": "critical", "depth": "deep"},
+        {"section_key": "financial_signals", "topic": "Funding & Financials", "search_query": f"{company} funding rounds valuation revenue ARR investors", "data_to_extract": "funding rounds, investors, valuation, ARR, burn rate", "priority": "critical", "depth": "deep"},
+        {"section_key": "business_model", "topic": "Business Model & Unit Economics", "search_query": f"{company} pricing business model revenue unit economics NRR margins", "data_to_extract": "pricing, ACV, revenue composition, CAC, LTV, NRR, margins", "priority": "critical", "depth": "deep"},
+        {"section_key": "market_and_competition", "topic": "Market & Competition", "search_query": f"{company} competitors market size industry landscape TAM", "data_to_extract": "TAM/SAM/SOM, named competitors, market trends, positioning", "priority": "high", "depth": "deep"},
+        {"section_key": "customer_evidence", "topic": "Customers & Traction", "search_query": f"{company} customers case studies reviews NPS retention churn", "data_to_extract": "customer logos, churn, NPS, case studies with ROI", "priority": "high", "depth": "standard"},
+        {"section_key": "comparable_transactions", "topic": "Comparable Transactions", "search_query": f"{company} sector M&A acquisitions comparable valuations multiples", "data_to_extract": "M&A comps, public comps with multiples", "priority": "high", "depth": "standard"},
+        {"section_key": "risk_and_regulatory", "topic": "Risks & Regulatory", "search_query": f"{company} risks regulatory compliance IP patents lawsuits", "data_to_extract": "key risks, regulatory status, IP exposure, compliance", "priority": "high", "depth": "standard"},
+        {"section_key": "exit_and_investment", "topic": "Exit & Investment Thesis", "search_query": f"{company} IPO acquisition exit investment outlook valuation", "data_to_extract": "exit paths, strategic acquirers, IPO readiness, IRR", "priority": "high", "depth": "standard"},
+        {"section_key": "unit_economics", "topic": "Unit Economics Deep Dive", "search_query": f"{company} CAC LTV gross margin retention payback period SaaS metrics", "data_to_extract": "CAC, LTV, LTV:CAC, NRR, gross margin, Rule of 40", "priority": "high", "depth": "standard"},
     ]
 
 
@@ -207,8 +218,8 @@ def _execute_search(client, company: str, topic: dict, run_id: str) -> Generator
         write_source(run_id, company, src["title"], src["url"], "Grounded web source")
         yield {"event": "source", "data": {"title": src["title"], "url": src["url"]}}
 
-    # Store finding
-    section_key = _topic_to_section_key(topic_name)
+    # Store finding — use section_key from plan, fallback to topic name mapping
+    section_key = topic.get("section_key") or _topic_to_section_key(topic_name)
     try:
         data = _parse_json(text)
         write_finding(run_id, company, section_key, json.dumps(data), sources)
@@ -220,45 +231,40 @@ def _execute_search(client, company: str, topic: dict, run_id: str) -> Generator
 
 
 def _topic_to_section_key(topic_name: str) -> str:
-    """Convert a free-form topic name to a snake_case section key."""
-    key = re.sub(r"[^a-z0-9]+", "_", topic_name.lower()).strip("_")
-    # Map common variations to canonical names
-    mappings = {
-        "company_overview": "company_profile",
-        "company_profile": "company_profile",
-        "leadership_team": "management_team",
-        "management_team": "management_team",
-        "leadership": "management_team",
-        "ceo_cto_cfo": "management_team",
-        "products_technology": "product_and_technology",
-        "product_technology": "product_and_technology",
-        "product_and_technology": "product_and_technology",
-        "funding_financials": "financial_signals",
-        "financial_signals": "financial_signals",
-        "financials": "financial_signals",
-        "funding": "financial_signals",
-        "revenue_financials": "financial_signals",
-        "business_model": "business_model",
-        "pricing_business_model": "business_model",
-        "unit_economics": "unit_economics",
-        "market_competition": "market_and_competition",
-        "market_landscape": "market_and_competition",
-        "competition": "market_and_competition",
-        "competitive_landscape": "market_and_competition",
-        "customers_traction": "customer_evidence",
-        "customer_evidence": "customer_evidence",
-        "customers": "customer_evidence",
-        "comparable_transactions": "comparable_transactions",
-        "comps_valuations": "comparable_transactions",
-        "risks_regulatory": "risk_and_regulatory",
-        "risk_assessment": "risk_and_regulatory",
-        "regulatory": "risk_and_regulatory",
-        "exit_investment_thesis": "exit_and_investment",
-        "exit_analysis": "exit_and_investment",
-        "investment_thesis": "exit_and_investment",
-        "exit_paths": "exit_and_investment",
-    }
-    return mappings.get(key, key)
+    """Convert a free-form topic name to a canonical section key using keyword matching."""
+    lower = topic_name.lower()
+
+    # Keyword-based matching — ORDER MATTERS (most specific first, then broader)
+    keyword_map = [
+        # Very specific multi-word phrases first
+        (["unit economics", "cac", "ltv", "payback period", "rule of 40"], "unit_economics"),
+        (["business model", "pricing strateg", "revenue model", "monetiz"], "business_model"),
+        (["comparable", "comps", "m&a", "acquisition deal", "transaction"], "comparable_transactions"),
+        (["exit", "ipo", "acquirer", "irr", "exit path", "ipo readiness"], "exit_and_investment"),
+        # Financial keywords (before "company" since "financial overview" should match here)
+        (["financial", "funding", "revenue", "arr ", "valuation", "burn rate", "investor", "series a", "series b", "series c", "series d"], "financial_signals"),
+        # Management (ceo/cto before general "company")
+        (["management", "leadership", "executive", "ceo", "cto", "cfo", "founder", "team lead", "c-suite"], "management_team"),
+        # Product/tech
+        (["product", "technology", "platform", "moat", "patent", "technical", "architecture", "r&d"], "product_and_technology"),
+        # Market
+        (["market", "competition", "competitor", "landscape", "tam", "sam", "industry", "positioning"], "market_and_competition"),
+        # Customer (retention here is customer retention, not unit econ)
+        (["customer", "client", "logo", "churn", "nps", "case stud", "traction"], "customer_evidence"),
+        # Risk/regulatory
+        (["risk", "regulatory", "compliance", "legal", "lawsuit"], "risk_and_regulatory"),
+        # Company profile last (broadest match)
+        (["company overview", "company profile", "headquarter", "founding history"], "company_profile"),
+        # NRR and gross margin — unit economics
+        (["nrr", "gross margin", "retention rate"], "unit_economics"),
+    ]
+
+    for keywords, section_key in keyword_map:
+        if any(kw in lower for kw in keywords):
+            return section_key
+
+    # Fallback: snake_case the topic name
+    return re.sub(r"[^a-z0-9]+", "_", lower).strip("_")
 
 
 # ═══════════════════════════════════════════════════════════════
