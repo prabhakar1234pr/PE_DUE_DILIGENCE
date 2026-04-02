@@ -332,7 +332,56 @@ def _reflect_on_findings(client, company: str, run_id: str, n_passes: int) -> di
 
 
 # ═══════════════════════════════════════════════════════════════
-# Main orchestration — PLAN → EXECUTE → REFLECT loop
+# Validation gate — does this company actually exist?
+# ═══════════════════════════════════════════════════════════════
+
+VALIDATE_PROMPT = """You just searched the web for information about "{company}".
+Here is what you found in the first research passes:
+
+{findings_summary}
+
+QUESTION: Does "{company}" appear to be a real, identifiable company?
+
+Return STRICT JSON:
+{{
+  "exists": true/false,
+  "confidence": "high|medium|low",
+  "reason": "1 sentence explanation",
+  "suggested_name": "correct company name if the user may have misspelled it, or null"
+}}
+
+Rules:
+- exists=true if the search found specific information ABOUT this company (founders, products, funding, HQ)
+- exists=false if the search only found generic industry data or completely unrelated results
+- If the findings are empty or only contain market reports not about this specific company, exists=false"""
+
+
+def _validate_company_exists(client, company: str, run_id: str) -> dict[str, Any]:
+    """After initial passes, check if the company actually exists."""
+    findings = get_findings(run_id)
+    parts = []
+    for f in findings[:3]:
+        content = f.get("content", "")
+        try:
+            data = json.loads(content)
+            s = data.get("summary", content[:300])
+        except Exception:
+            s = content[:300]
+        parts.append(f"- {f['section']}: {s[:200]}")
+
+    summary = "\n".join(parts) if parts else "(No findings yet)"
+
+    prompt = VALIDATE_PROMPT.format(company=company, findings_summary=summary)
+    try:
+        text, _ = _call_gemini(client, prompt, use_search=False)
+        return _parse_json(text)
+    except Exception:
+        # If validation fails, assume it exists and continue
+        return {"exists": True, "confidence": "low", "reason": "Validation failed, proceeding anyway.", "suggested_name": None}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Main orchestration — PLAN → EXECUTE → VALIDATE → REFLECT loop
 # ═══════════════════════════════════════════════════════════════
 
 def run_research(company: str) -> dict[str, Any]:
@@ -346,11 +395,26 @@ def run_research(company: str) -> dict[str, Any]:
     # Plan
     plan = _create_research_plan(client, company)
 
-    # Execute + Reflect loop
+    # Execute first 2 passes, then validate
     n_passes = 0
-    follow_up_count = 0
 
-    for topic in plan[:MAX_RESEARCH_PASSES]:
+    for topic in plan[:2]:
+        for _ in _execute_search(client, company, topic, run_id):
+            pass
+        n_passes += 1
+
+    # Validation gate — does this company actually exist?
+    validation = _validate_company_exists(client, company, run_id)
+    if not validation.get("exists", True):
+        reason = validation.get("reason", "Company not found")
+        suggested = validation.get("suggested_name")
+        error_msg = f"Company not found: {reason}"
+        if suggested:
+            error_msg += f" Did you mean: {suggested}?"
+        raise ValueError(error_msg)
+
+    # Continue remaining passes
+    for topic in plan[2:MAX_RESEARCH_PASSES]:
         for _ in _execute_search(client, company, topic, run_id):
             pass
         n_passes += 1
@@ -392,14 +456,35 @@ def run_research_stream(company: str) -> Generator:
     for i, topic in enumerate(plan[:5]):
         yield {"event": "thinking", "data": f"Planned: [{topic.get('priority', '?')}] {topic.get('topic', '?')}"}
 
-    # ── Phase 2: EXECUTE ──
+    # ── Phase 2: EXECUTE (first 2 passes) ──
     n_passes = 0
-    for i, topic in enumerate(plan):
+    for topic in plan[:2]:
+        topic_name = topic.get("topic", "Research")
+        yield {"event": "progress", "data": f"[{n_passes+1}/{len(plan)}] {topic_name}"}
+        for event in _execute_search(client, company, topic, run_id):
+            yield event
+        n_passes += 1
+
+    # ── Validation gate: does this company exist? ──
+    yield {"event": "thinking", "data": f"Validating that {company} is a real, identifiable company..."}
+    validation = _validate_company_exists(client, company, run_id)
+    if not validation.get("exists", True):
+        reason = validation.get("reason", "Company not found in search results")
+        suggested = validation.get("suggested_name")
+        msg = f"Company not found: {reason}"
+        if suggested:
+            msg += f" Did you mean: {suggested}?"
+        yield {"event": "error", "data": msg}
+        return
+    yield {"event": "thinking", "data": f"Validated: {company} exists (confidence: {validation.get('confidence', '?')})"}
+
+    # ── Continue remaining passes ──
+    for i, topic in enumerate(plan[2:]):
         if n_passes >= MAX_RESEARCH_PASSES:
             break
         topic_name = topic.get("topic", "Research")
         priority = topic.get("priority", "standard")
-        yield {"event": "progress", "data": f"[{i+1}/{len(plan)}] {topic_name} ({priority})"}
+        yield {"event": "progress", "data": f"[{n_passes+1}/{len(plan)}] {topic_name} ({priority})"}
 
         for event in _execute_search(client, company, topic, run_id):
             yield event
