@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 google-genai
 google-cloud-storage
-python-pptx
+httpx
 requests
 pytest

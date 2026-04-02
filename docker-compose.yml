@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  # ── Presenton — AI presentation generator ──────────────────────
+  presenton:
+    image: ghcr.io/presenton/presenton:latest
+    ports:
+      - "5000:80"
+    environment:
+      LLM: google
+      GOOGLE_API_KEY: ${GEMINI_API_KEY}
+      GOOGLE_MODEL: models/gemini-2.5-flash
+      IMAGE_PROVIDER: gemini_flash
+      DISABLE_IMAGE_GENERATION: "true"  # faster generation, no image API calls
+      CAN_CHANGE_KEYS: "false"
+    volumes:
+      - presenton_data:/app_data
+    restart: unless-stopped
+
+  # ── Backend — PE Due Diligence API ─────────────────────────────
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      MOCK_MODE: "false"
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_RESEARCH_MODEL: gemini-2.5-pro
+      GCP_BUCKET_NAME: ${GCP_BUCKET_NAME:-}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      PRESENTON_URL: http://presenton:80
+    volumes:
+      - presenton_data:/app_data:ro  # read Presenton's output files
+    depends_on:
+      - presenton
+
+  # ── Frontend — Next.js UI ──────────────────────────────────────
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+
+volumes:
+  presenton_data:

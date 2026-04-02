@@ -58,7 +58,7 @@ jobs:
             GCP_PROJECT_ID=pe-dd-demo-03312257
             GCP_BUCKET_NAME=pe-dd-demo-03312257-reports
             GEMINI_RESEARCH_MODEL=gemini-2.5-pro
-            GEMINI_SLIDE_MODEL=gemini-2.5-pro
+            PRESENTON_URL=${{ secrets.PRESENTON_URL }}
             MOCK_MODE=false
           secrets: |
             GEMINI_API_KEY=gemini-api-key:latest
