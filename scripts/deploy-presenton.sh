@@ -13,7 +13,9 @@ set -euo pipefail
 PROJECT_ID="${GCP_PROJECT_ID:-pe-dd-demo-03312257}"
 REGION="us-central1"
 SERVICE_NAME="pe-dd-presenton"
-IMAGE="ghcr.io/presenton/presenton:latest"
+# Cloud Run can't pull from ghcr.io directly — use Artifact Registry remote repo mirror.
+# Created via: gcloud artifacts repositories create ghcr-mirror --mode=remote-repository --remote-docker-repo=https://ghcr.io ...
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/ghcr-mirror/presenton/presenton:latest"
 
 echo "==> Deploying Presenton to Cloud Run ($SERVICE_NAME in $REGION)..."
 
