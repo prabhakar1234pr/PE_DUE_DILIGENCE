@@ -1,13 +1,16 @@
 import json
+import re
 from io import BytesIO
 from typing import Any
 
 from google import genai
 from google.genai import types
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 
 from app.settings import settings
@@ -20,21 +23,255 @@ WHITE = RGBColor(255, 255, 255)
 LIGHT_GRAY = RGBColor(180, 180, 195)
 ACCENT_TEAL = RGBColor(56, 189, 170)
 ACCENT_RED = RGBColor(220, 80, 80)
+ACCENT_AMBER = RGBColor(230, 170, 50)
 DARK_CARD = RGBColor(20, 38, 65)
 MID_GRAY = RGBColor(120, 130, 150)
+DARK_CARD_ALT = RGBColor(15, 30, 52)
+TABLE_HEADER = RGBColor(25, 50, 85)
+TABLE_ROW_ODD = RGBColor(14, 28, 48)
+TABLE_ROW_EVEN = RGBColor(18, 35, 60)
+
+SEVERITY_COLORS = {
+    "high": ACCENT_RED,
+    "medium-high": RGBColor(230, 130, 50),
+    "medium": ACCENT_AMBER,
+    "medium-low": RGBColor(180, 190, 60),
+    "low": ACCENT_TEAL,
+}
+
+CHART_SERIES_COLORS = [GOLD, ACCENT_TEAL, ACCENT_RED, ACCENT_AMBER, LIGHT_GRAY, RGBColor(140, 100, 200)]
 
 # ── Slide dimensions (16:9 widescreen) ──────────────────────
 SLIDE_W = Inches(13.333)
 SLIDE_H = Inches(7.5)
-
-# ── Layout constants ─────────────────────────────────────────
 HEADER_H = Inches(0.55)
 ACCENT_W = Inches(0.1)
 FOOTER_H = Inches(0.35)
 CONTENT_LEFT = Inches(0.65)
 CONTENT_TOP = Inches(1.15)
 CONTENT_W = Inches(12.0)
-CONTENT_BOTTOM = SLIDE_H - FOOTER_H - Inches(0.2)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Visual toolkit — helpers the LLM can "call" via slide data
+# ═══════════════════════════════════════════════════════════════
+
+def _style_chart(chart, transparent_bg: bool = True):
+    """Apply dark-theme styling to any chart."""
+    chart.has_legend = False
+    if transparent_bg:
+        chart.chart_style = 2
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        for series in plot.series:
+            series.data_labels.font.size = Pt(10)
+            series.data_labels.font.color.rgb = WHITE
+    # Axis styling
+    if hasattr(chart, "category_axis"):
+        ax = chart.category_axis
+        ax.tick_labels.font.size = Pt(9)
+        ax.tick_labels.font.color.rgb = LIGHT_GRAY
+        ax.format.line.fill.background()
+        ax.has_major_gridlines = False
+    if hasattr(chart, "value_axis"):
+        ax = chart.value_axis
+        ax.tick_labels.font.size = Pt(9)
+        ax.tick_labels.font.color.rgb = LIGHT_GRAY
+        ax.format.line.fill.background()
+        ax.has_major_gridlines = False
+        ax.major_gridlines.format.line.fill.background() if ax.has_major_gridlines else None
+
+
+def _add_bar_chart(slide, x, y, w, h, categories: list[str], values: list[float],
+                   series_name: str = "Value", colors: list[RGBColor] | None = None):
+    """Add a styled bar chart."""
+    chart_data = CategoryChartData()
+    chart_data.categories = categories
+    chart_data.add_series(series_name, values)
+    graphic = slide.shapes.add_chart(XL_CHART_TYPE.BAR_CLUSTERED, x, y, w, h, chart_data)
+    chart = graphic.chart
+    _style_chart(chart)
+    # Color individual bars
+    series = chart.series[0]
+    if colors:
+        for idx, point in enumerate(series.points):
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = colors[idx % len(colors)]
+    else:
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = GOLD
+    return chart
+
+
+def _add_column_chart(slide, x, y, w, h, categories: list[str],
+                      series_data: list[tuple[str, list[float]]],
+                      colors: list[RGBColor] | None = None):
+    """Add a multi-series column chart."""
+    chart_data = CategoryChartData()
+    chart_data.categories = categories
+    for name, vals in series_data:
+        chart_data.add_series(name, vals)
+    graphic = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, w, h, chart_data)
+    chart = graphic.chart
+    _style_chart(chart)
+    clrs = colors or CHART_SERIES_COLORS
+    for i, series in enumerate(chart.series):
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = clrs[i % len(clrs)]
+    if len(chart.series) > 1:
+        chart.has_legend = True
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.font.size = Pt(9)
+        chart.legend.font.color.rgb = LIGHT_GRAY
+        chart.legend.include_in_layout = False
+    return chart
+
+
+def _add_pie_chart(slide, x, y, w, h, categories: list[str], values: list[float],
+                   colors: list[RGBColor] | None = None):
+    """Add a styled pie chart."""
+    chart_data = CategoryChartData()
+    chart_data.categories = categories
+    chart_data.add_series("Share", values)
+    graphic = slide.shapes.add_chart(XL_CHART_TYPE.PIE, x, y, w, h, chart_data)
+    chart = graphic.chart
+    chart.has_legend = True
+    chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+    chart.legend.font.size = Pt(9)
+    chart.legend.font.color.rgb = LIGHT_GRAY
+    chart.legend.include_in_layout = False
+    plot = chart.plots[0]
+    plot.has_data_labels = True
+    data_labels = plot.data_labels
+    data_labels.font.size = Pt(10)
+    data_labels.font.color.rgb = WHITE
+    data_labels.font.bold = True
+    # Color slices
+    clrs = colors or CHART_SERIES_COLORS
+    for idx, point in enumerate(chart.series[0].points):
+        point.format.fill.solid()
+        point.format.fill.fore_color.rgb = clrs[idx % len(clrs)]
+    return chart
+
+
+def _add_doughnut_chart(slide, x, y, w, h, categories: list[str], values: list[float],
+                        colors: list[RGBColor] | None = None):
+    """Add a styled doughnut chart."""
+    chart_data = CategoryChartData()
+    chart_data.categories = categories
+    chart_data.add_series("Share", values)
+    graphic = slide.shapes.add_chart(XL_CHART_TYPE.DOUGHNUT, x, y, w, h, chart_data)
+    chart = graphic.chart
+    chart.has_legend = True
+    chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+    chart.legend.font.size = Pt(9)
+    chart.legend.font.color.rgb = LIGHT_GRAY
+    chart.legend.include_in_layout = False
+    plot = chart.plots[0]
+    plot.has_data_labels = True
+    plot.data_labels.font.size = Pt(11)
+    plot.data_labels.font.color.rgb = WHITE
+    plot.data_labels.font.bold = True
+    clrs = colors or CHART_SERIES_COLORS
+    for idx, point in enumerate(chart.series[0].points):
+        point.format.fill.solid()
+        point.format.fill.fore_color.rgb = clrs[idx % len(clrs)]
+    return chart
+
+
+def _add_styled_table(slide, x, y, w, headers: list[str], rows: list[list[str]]):
+    """Add a professionally styled table."""
+    n_rows = len(rows) + 1  # +1 for header
+    n_cols = len(headers)
+    row_h = Inches(0.4)
+    total_h = row_h * n_rows
+    tbl_shape = slide.shapes.add_table(n_rows, n_cols, x, y, w, total_h)
+    table = tbl_shape.table
+
+    col_w = int(w / n_cols) if n_cols else w
+    for i in range(n_cols):
+        table.columns[i].width = col_w
+
+    # Header row
+    for j, hdr in enumerate(headers):
+        cell = table.cell(0, j)
+        cell.text = hdr
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = TABLE_HEADER
+        p = cell.text_frame.paragraphs[0]
+        p.font.size = Pt(11)
+        p.font.bold = True
+        p.font.color.rgb = GOLD
+        p.alignment = PP_ALIGN.LEFT
+        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+    # Data rows
+    for i, row in enumerate(rows):
+        bg = TABLE_ROW_ODD if i % 2 == 0 else TABLE_ROW_EVEN
+        for j, val in enumerate(row):
+            cell = table.cell(i + 1, j)
+            cell.text = str(val) if val else ""
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = bg
+            p = cell.text_frame.paragraphs[0]
+            p.font.size = Pt(10)
+            p.font.color.rgb = WHITE
+            p.alignment = PP_ALIGN.LEFT
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+    table.first_row = True
+    return table
+
+
+def _add_progress_bar(slide, x, y, w, h, pct: float, label: str = "",
+                      fill_color: RGBColor = ACCENT_TEAL):
+    """Add a progress bar: background rect + filled portion + label."""
+    pct = max(0, min(100, pct))
+    # Background
+    bg = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = RGBColor(30, 45, 70)
+    bg.line.fill.background()
+    # Fill
+    fill_w = int(w * (pct / 100))
+    if fill_w > 0:
+        bar = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, fill_w, h)
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = fill_color
+        bar.line.fill.background()
+    # Label
+    if label:
+        lb = slide.shapes.add_textbox(x, y, w, h)
+        lf = lb.text_frame
+        lp = lf.paragraphs[0]
+        lp.text = f"  {label}: {pct:.0f}%"
+        lp.font.size = Pt(9)
+        lp.font.bold = True
+        lp.font.color.rgb = WHITE
+        lp.alignment = PP_ALIGN.LEFT
+
+
+def _add_risk_block(slide, x, y, w, h, risk_text: str, severity: str):
+    """Add a color-coded risk indicator block."""
+    color = SEVERITY_COLORS.get(severity.lower(), MID_GRAY)
+    block = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
+    block.fill.solid()
+    block.fill.fore_color.rgb = color
+    block.line.fill.background()
+    tf = block.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.text = risk_text
+    p.font.size = Pt(10)
+    p.font.bold = True
+    p.font.color.rgb = WHITE
+    p.alignment = PP_ALIGN.CENTER
+    # Severity label
+    p2 = tf.add_paragraph()
+    p2.text = severity.upper()
+    p2.font.size = Pt(8)
+    p2.font.color.rgb = WHITE
+    p2.alignment = PP_ALIGN.CENTER
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -43,32 +280,29 @@ CONTENT_BOTTOM = SLIDE_H - FOOTER_H - Inches(0.2)
 
 def _add_background(slide):
     bg = slide.background
-    bg.fill.solid()
-    bg.fill.fore_color.rgb = DARK_NAVY
+    bg.fill.gradient()
+    bg.fill.gradient_angle = 135
+    stops = bg.fill.gradient_stops
+    stops[0].color.rgb = DARK_NAVY
+    stops[0].position = 0.0
+    stops[1].color.rgb = NAVY_LIGHT
+    stops[1].position = 1.0
 
 
 def _add_header_bar(slide, title: str, subtitle: str):
-    """Top band with title and subtitle."""
     bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, SLIDE_W, HEADER_H)
     bar.fill.solid()
     bar.fill.fore_color.rgb = NAVY_LIGHT
     bar.line.fill.background()
-
-    # Title
     tb = slide.shapes.add_textbox(Inches(0.65), Inches(0.06), Inches(9.5), Inches(0.3))
-    tf = tb.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
+    p = tb.text_frame.paragraphs[0]
     p.text = title
     p.font.size = Pt(22)
     p.font.bold = True
     p.font.color.rgb = WHITE
-
-    # Subtitle
     if subtitle:
         sb = slide.shapes.add_textbox(Inches(0.65), Inches(0.34), Inches(9.5), Inches(0.2))
-        sf = sb.text_frame
-        sp = sf.paragraphs[0]
+        sp = sb.text_frame.paragraphs[0]
         sp.text = subtitle
         sp.font.size = Pt(12)
         sp.font.color.rgb = GOLD
@@ -76,355 +310,374 @@ def _add_header_bar(slide, title: str, subtitle: str):
 
 
 def _add_accent_bar(slide):
-    """Thin gold vertical bar on the left."""
-    bar = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, HEADER_H, ACCENT_W, SLIDE_H - HEADER_H
-    )
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, HEADER_H, ACCENT_W, SLIDE_H - HEADER_H)
     bar.fill.solid()
     bar.fill.fore_color.rgb = GOLD
     bar.line.fill.background()
 
 
 def _add_footer(slide, company: str, slide_num: int, total: int):
-    """Bottom bar with company, slide counter, confidential label."""
-    bar = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, SLIDE_H - FOOTER_H, SLIDE_W, FOOTER_H
-    )
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, SLIDE_H - FOOTER_H, SLIDE_W, FOOTER_H)
     bar.fill.solid()
     bar.fill.fore_color.rgb = NAVY_LIGHT
     bar.line.fill.background()
-
-    # Company name (left)
-    lb = slide.shapes.add_textbox(Inches(0.65), SLIDE_H - FOOTER_H + Inches(0.06), Inches(4), Inches(0.22))
-    lf = lb.text_frame
-    lp = lf.paragraphs[0]
-    lp.text = company
-    lp.font.size = Pt(9)
-    lp.font.color.rgb = MID_GRAY
-
-    # Slide number (center)
-    cb = slide.shapes.add_textbox(Inches(5.5), SLIDE_H - FOOTER_H + Inches(0.06), Inches(2.5), Inches(0.22))
-    cf = cb.text_frame
-    cp = cf.paragraphs[0]
-    cp.text = f"{slide_num} / {total}"
-    cp.font.size = Pt(9)
-    cp.font.color.rgb = MID_GRAY
-    cp.alignment = PP_ALIGN.CENTER
-
-    # Confidential (right)
-    rb = slide.shapes.add_textbox(Inches(10.0), SLIDE_H - FOOTER_H + Inches(0.06), Inches(3.0), Inches(0.22))
-    rf = rb.text_frame
-    rp = rf.paragraphs[0]
-    rp.text = "CONFIDENTIAL"
-    rp.font.size = Pt(8)
-    rp.font.color.rgb = GOLD
-    rp.font.bold = True
-    rp.alignment = PP_ALIGN.RIGHT
+    for text, x, align in [
+        (company, Inches(0.65), PP_ALIGN.LEFT),
+        (f"{slide_num} / {total}", Inches(5.5), PP_ALIGN.CENTER),
+        ("CONFIDENTIAL", Inches(10.0), PP_ALIGN.RIGHT),
+    ]:
+        tb = slide.shapes.add_textbox(x, SLIDE_H - FOOTER_H + Inches(0.06), Inches(3.0), Inches(0.22))
+        p = tb.text_frame.paragraphs[0]
+        p.text = text
+        p.font.size = Pt(9 if text != "CONFIDENTIAL" else 8)
+        p.font.color.rgb = GOLD if text == "CONFIDENTIAL" else MID_GRAY
+        p.font.bold = text == "CONFIDENTIAL"
+        p.alignment = align
 
 
-def _add_chrome(slide, company: str, title: str, subtitle: str, slide_num: int, total: int):
+def _add_chrome(slide, company, title, subtitle, slide_num, total):
     _add_background(slide)
     _add_header_bar(slide, title, subtitle)
     _add_accent_bar(slide)
     _add_footer(slide, company, slide_num, total)
 
 
+def _add_bullets(slide, bullets: list[str], x=None, y=None, w=None, font_size=16, max_items=6):
+    """Add bullet list to slide. Returns final y position."""
+    x = x or CONTENT_LEFT
+    y = y or CONTENT_TOP
+    w = w or CONTENT_W
+    for bullet in bullets[:max_items]:
+        bb = slide.shapes.add_textbox(x, y, w, Inches(0.4))
+        bb.text_frame.word_wrap = True
+        bp = bb.text_frame.paragraphs[0]
+        bp.text = f"\u25B8  {bullet}"
+        bp.font.size = Pt(font_size)
+        bp.font.color.rgb = WHITE
+        y += Inches(0.42)
+    return y
+
+
+def _add_key_stat_box(slide, text: str, x=None, y=None, w=None):
+    if not text:
+        return
+    x = x or CONTENT_LEFT
+    y = y or Inches(5.3)
+    w = w or Inches(11.5)
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, Inches(0.5))
+    box.fill.solid()
+    box.fill.fore_color.rgb = DARK_CARD
+    box.line.color.rgb = GOLD
+    box.line.width = Pt(1.2)
+    p = box.text_frame.paragraphs[0]
+    p.text = f"  \u2B50  {text}"
+    p.font.size = Pt(13)
+    p.font.bold = True
+    p.font.color.rgb = GOLD
+
+
+def _add_source_line(slide, source_ids: list):
+    if not source_ids:
+        return
+    tb = slide.shapes.add_textbox(CONTENT_LEFT, SLIDE_H - FOOTER_H - Inches(0.35), Inches(10), Inches(0.2))
+    p = tb.text_frame.paragraphs[0]
+    p.text = "Sources: " + "  ".join(f"[{s}]" for s in source_ids)
+    p.font.size = Pt(9)
+    p.font.color.rgb = MID_GRAY
+
+
 # ═══════════════════════════════════════════════════════════════
-# Slide type renderers
+# Slide type renderers — now visual-toolkit-aware
 # ═══════════════════════════════════════════════════════════════
 
-def _render_title_slide(slide, company: str, data: dict, total: int):
+def _render_title_slide(slide, company, data, total):
     _add_background(slide)
     _add_accent_bar(slide)
     _add_footer(slide, company, 1, total)
-
-    # Company name large centered
+    # Decorative top shape
+    deco = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, SLIDE_W, Inches(0.08))
+    deco.fill.solid()
+    deco.fill.fore_color.rgb = GOLD
+    deco.line.fill.background()
+    # Company name
     tb = slide.shapes.add_textbox(Inches(1.5), Inches(2.0), Inches(10.5), Inches(1.2))
-    tf = tb.text_frame
-    p = tf.paragraphs[0]
+    p = tb.text_frame.paragraphs[0]
     p.text = company
     p.font.size = Pt(44)
     p.font.bold = True
     p.font.color.rgb = WHITE
     p.alignment = PP_ALIGN.CENTER
-
     # Subtitle
     sb = slide.shapes.add_textbox(Inches(1.5), Inches(3.3), Inches(10.5), Inches(0.5))
-    sf = sb.text_frame
-    sp = sf.paragraphs[0]
+    sp = sb.text_frame.paragraphs[0]
     sp.text = "Private Equity Due Diligence"
     sp.font.size = Pt(24)
     sp.font.color.rgb = GOLD
     sp.alignment = PP_ALIGN.CENTER
-
-    # Divider line
+    # Divider
     line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(4.5), Inches(4.1), Inches(4.5), Inches(0.02))
     line.fill.solid()
     line.fill.fore_color.rgb = GOLD
     line.line.fill.background()
-
-    # Confidential notice
+    # Confidential
     nb = slide.shapes.add_textbox(Inches(2), Inches(4.5), Inches(9.5), Inches(0.4))
-    nf = nb.text_frame
-    np_ = nf.paragraphs[0]
+    np_ = nb.text_frame.paragraphs[0]
     np_.text = "CONFIDENTIAL \u2014 For Investment Committee Use Only"
     np_.font.size = Pt(12)
     np_.font.color.rgb = MID_GRAY
     np_.alignment = PP_ALIGN.CENTER
-
-    # Key stat if available
+    # Key stat
     ks = data.get("key_stat", "")
     if ks:
         kb = slide.shapes.add_textbox(Inches(2), Inches(5.2), Inches(9.5), Inches(0.35))
-        kf = kb.text_frame
-        kp = kf.paragraphs[0]
+        kp = kb.text_frame.paragraphs[0]
         kp.text = ks
         kp.font.size = Pt(14)
         kp.font.color.rgb = LIGHT_GRAY
         kp.alignment = PP_ALIGN.CENTER
 
 
-def _render_content_slide(slide, company: str, data: dict, slide_num: int, total: int):
+def _render_content_slide(slide, company, data, slide_num, total):
     _add_chrome(slide, company, data.get("title", ""), data.get("subtitle", ""), slide_num, total)
-
     bullets = data.get("bullets", [])
-    y = CONTENT_TOP
-    for bullet in bullets[:6]:
-        bb = slide.shapes.add_textbox(CONTENT_LEFT, y, CONTENT_W, Inches(0.4))
-        bf = bb.text_frame
-        bf.word_wrap = True
-        bp = bf.paragraphs[0]
-        bp.text = f"\u25B8  {bullet}"
-        bp.font.size = Pt(16)
-        bp.font.color.rgb = WHITE
-        y += Inches(0.45)
+    chart_spec = data.get("chart")
+    table_spec = data.get("table_data")
+    risk_blocks = data.get("risk_blocks")
+    progress_bars_spec = data.get("progress_bars")
 
-    # Key stat callout box
-    ks = data.get("key_stat", "")
-    if ks:
-        box_y = max(y + Inches(0.2), Inches(5.0))
-        box = slide.shapes.add_shape(
-            MSO_SHAPE.ROUNDED_RECTANGLE,
-            CONTENT_LEFT, box_y, Inches(11.5), Inches(0.55)
-        )
-        box.fill.solid()
-        box.fill.fore_color.rgb = DARK_CARD
-        box.line.color.rgb = GOLD
-        box.line.width = Pt(1.2)
+    if chart_spec and (table_spec or risk_blocks):
+        # Chart + table/risk: split layout
+        _add_bullets(slide, bullets[:3], w=Inches(5.5), max_items=3)
+        _render_chart_from_spec(slide, chart_spec, Inches(6.5), CONTENT_TOP, Inches(5.8), Inches(3.5))
+        if table_spec:
+            _render_table_from_spec(slide, table_spec, CONTENT_LEFT, Inches(3.8), Inches(5.5))
+    elif chart_spec:
+        # Left bullets + right chart
+        bw = Inches(5.5)
+        _add_bullets(slide, bullets, w=bw, max_items=5)
+        _render_chart_from_spec(slide, chart_spec, Inches(6.5), CONTENT_TOP, Inches(6.0), Inches(4.0))
+    elif table_spec:
+        # Bullets above + table below
+        final_y = _add_bullets(slide, bullets[:2], max_items=2)
+        _render_table_from_spec(slide, table_spec, CONTENT_LEFT, final_y + Inches(0.1), CONTENT_W)
+    elif risk_blocks:
+        # Bullets + risk severity blocks
+        _add_bullets(slide, bullets[:2], max_items=2)
+        _render_risk_blocks(slide, risk_blocks)
+    elif progress_bars_spec:
+        _add_bullets(slide, bullets[:3], max_items=3)
+        _render_progress_bars(slide, progress_bars_spec)
+    else:
+        # Plain bullets
+        _add_bullets(slide, bullets)
 
-        kt = box.text_frame
-        kp = kt.paragraphs[0]
-        kp.text = f"  \u2B50  {ks}"
-        kp.font.size = Pt(13)
-        kp.font.bold = True
-        kp.font.color.rgb = GOLD
-        kp.alignment = PP_ALIGN.LEFT
-
-    # Source IDs
-    sids = data.get("source_ids", [])
-    if sids:
-        stb = slide.shapes.add_textbox(
-            CONTENT_LEFT, SLIDE_H - FOOTER_H - Inches(0.35), Inches(10), Inches(0.2)
-        )
-        sf = stb.text_frame
-        sp = sf.paragraphs[0]
-        sp.text = "Sources: " + "  ".join(f"[{s}]" for s in sids)
-        sp.font.size = Pt(9)
-        sp.font.color.rgb = MID_GRAY
+    _add_key_stat_box(slide, data.get("key_stat", ""))
+    _add_source_line(slide, data.get("source_ids", []))
 
 
-def _render_dashboard_slide(slide, company: str, data: dict, slide_num: int, total: int):
+def _render_dashboard_slide(slide, company, data, slide_num, total):
     _add_chrome(slide, company, data.get("title", "Dashboard"), data.get("subtitle", ""), slide_num, total)
-
     metrics = data.get("dashboard_metrics", [])[:6]
-    if not metrics:
+    chart_spec = data.get("chart")
+
+    if not metrics and not chart_spec:
         _render_content_slide(slide, company, data, slide_num, total)
         return
 
-    cols = 3 if len(metrics) > 4 else 2
-    card_w = Inches(3.6)
-    card_h = Inches(1.6)
-    gap_x = Inches(0.3)
-    gap_y = Inches(0.25)
-    start_x = CONTENT_LEFT
-    start_y = CONTENT_TOP + Inches(0.1)
+    # KPI cards in top row
+    cols = 3 if len(metrics) > 4 else (2 if len(metrics) > 0 else 0)
+    if cols:
+        card_w = Inches(3.6)
+        card_h = Inches(1.3)
+        gap_x = Inches(0.3)
+        gap_y = Inches(0.2)
+        for i, m in enumerate(metrics):
+            col = i % cols
+            row = i // cols
+            x = CONTENT_LEFT + (card_w + gap_x) * col
+            y = CONTENT_TOP + (card_h + gap_y) * row
+            card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
+            card.fill.solid()
+            card.fill.fore_color.rgb = DARK_CARD
+            card.line.color.rgb = RGBColor(30, 50, 80)
+            card.line.width = Pt(0.8)
+            # Label
+            lb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(0.12), card_w - Inches(0.4), Inches(0.18))
+            lp = lb.text_frame.paragraphs[0]
+            lp.text = str(m.get("label", "")).upper()
+            lp.font.size = Pt(9)
+            lp.font.color.rgb = GOLD
+            lp.font.bold = True
+            # Value
+            vb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(0.4), card_w - Inches(0.4), Inches(0.4))
+            vp = vb.text_frame.paragraphs[0]
+            vp.text = str(m.get("value", "N/A"))
+            vp.font.size = Pt(24)
+            vp.font.bold = True
+            vp.font.color.rgb = WHITE
+            # Trend
+            trend = str(m.get("trend", "flat"))
+            arrow = "\u2191" if trend == "up" else ("\u2193" if trend == "down" else "\u2192")
+            color = ACCENT_TEAL if trend == "up" else (ACCENT_RED if trend == "down" else MID_GRAY)
+            tb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(0.95), card_w - Inches(0.4), Inches(0.2))
+            tp = tb.text_frame.paragraphs[0]
+            tp.text = f"{arrow}  {trend.upper()}"
+            tp.font.size = Pt(10)
+            tp.font.bold = True
+            tp.font.color.rgb = color
 
-    for i, metric in enumerate(metrics):
-        col = i % cols
-        row = i // cols
-        x = start_x + (card_w + gap_x) * col
-        y = start_y + (card_h + gap_y) * row
+    # Chart below the cards
+    if chart_spec:
+        chart_y = CONTENT_TOP + Inches(3.0) if cols else CONTENT_TOP
+        _render_chart_from_spec(slide, chart_spec, CONTENT_LEFT, chart_y, Inches(11.5), Inches(3.2))
+    elif len(metrics) >= 3:
+        # Auto-generate a bar chart from the metrics
+        cats = []
+        vals = []
+        for m in metrics:
+            cats.append(str(m.get("label", ""))[:15])
+            v = _extract_numeric(str(m.get("value", "0")))
+            vals.append(v)
+        if any(v > 0 for v in vals):
+            chart_y = CONTENT_TOP + Inches(3.0) if cols else CONTENT_TOP
+            _add_bar_chart(slide, CONTENT_LEFT, chart_y, Inches(11.5), Inches(3.0),
+                           cats, vals, "Metrics")
 
-        card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
-        card.fill.solid()
-        card.fill.fore_color.rgb = DARK_CARD
-        card.line.color.rgb = RGBColor(30, 50, 80)
-        card.line.width = Pt(0.8)
-
-        # Label
-        lb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(0.15), card_w - Inches(0.4), Inches(0.2))
-        lf = lb.text_frame
-        lp = lf.paragraphs[0]
-        lp.text = str(metric.get("label", "Metric")).upper()
-        lp.font.size = Pt(10)
-        lp.font.color.rgb = GOLD
-        lp.font.bold = True
-
-        # Value
-        vb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(0.5), card_w - Inches(0.4), Inches(0.45))
-        vf = vb.text_frame
-        vp = vf.paragraphs[0]
-        vp.text = str(metric.get("value", "N/A"))
-        vp.font.size = Pt(26)
-        vp.font.bold = True
-        vp.font.color.rgb = WHITE
-
-        # Trend
-        trend = str(metric.get("trend", "flat"))
-        arrow = "\u2191" if trend == "up" else ("\u2193" if trend == "down" else "\u2192")
-        color = ACCENT_TEAL if trend == "up" else (ACCENT_RED if trend == "down" else MID_GRAY)
-
-        tb = slide.shapes.add_textbox(x + Inches(0.2), y + Inches(1.1), card_w - Inches(0.4), Inches(0.25))
-        ttf = tb.text_frame
-        tp = ttf.paragraphs[0]
-        tp.text = f"{arrow}  {trend.upper()}"
-        tp.font.size = Pt(11)
-        tp.font.bold = True
-        tp.font.color.rgb = color
-
-    # Bullets below cards if any
-    bullets = data.get("bullets", [])
-    if bullets:
-        by = start_y + (card_h + gap_y) * (((len(metrics) - 1) // cols) + 1) + Inches(0.15)
-        for b in bullets[:3]:
-            bb = slide.shapes.add_textbox(CONTENT_LEFT, by, CONTENT_W, Inches(0.3))
-            bf = bb.text_frame
-            bp = bf.paragraphs[0]
-            bp.text = f"\u25B8  {b}"
-            bp.font.size = Pt(13)
-            bp.font.color.rgb = LIGHT_GRAY
-            by += Inches(0.35)
+    _add_source_line(slide, data.get("source_ids", []))
 
 
-def _render_exec_summary(slide, company: str, data: dict, slide_num: int, total: int):
+def _render_exec_summary(slide, company, data, slide_num, total):
     _add_chrome(slide, company, data.get("title", "Executive Summary"), data.get("subtitle", ""), slide_num, total)
-
-    # Left callout box (35% width)
     ks = data.get("key_stat", "Key insight")
-    box = slide.shapes.add_shape(
-        MSO_SHAPE.ROUNDED_RECTANGLE,
-        CONTENT_LEFT, CONTENT_TOP, Inches(4.0), Inches(2.5)
-    )
+    # Left callout
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, CONTENT_LEFT, CONTENT_TOP, Inches(4.0), Inches(2.5))
     box.fill.solid()
     box.fill.fore_color.rgb = DARK_CARD
     box.line.color.rgb = GOLD
     box.line.width = Pt(1.5)
-
-    kt = box.text_frame
-    kt.word_wrap = True
-    kp = kt.paragraphs[0]
-    kp.text = "\u2B50  KEY INSIGHT"
-    kp.font.size = Pt(10)
-    kp.font.color.rgb = GOLD
-    kp.font.bold = True
-
-    vp = kt.add_paragraph()
+    tf = box.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.text = "\u2B50  KEY INSIGHT"
+    p.font.size = Pt(10)
+    p.font.color.rgb = GOLD
+    p.font.bold = True
+    vp = tf.add_paragraph()
     vp.text = ks
-    vp.font.size = Pt(18)
+    vp.font.size = Pt(16)
     vp.font.color.rgb = WHITE
     vp.font.bold = True
-
-    # Right bullets (60% width)
-    bullets = data.get("bullets", [])
-    y = CONTENT_TOP
-    for bullet in bullets[:6]:
-        bb = slide.shapes.add_textbox(Inches(5.2), y, Inches(7.5), Inches(0.4))
-        bf = bb.text_frame
-        bf.word_wrap = True
-        bp = bf.paragraphs[0]
-        bp.text = f"\u25B8  {bullet}"
-        bp.font.size = Pt(15)
-        bp.font.color.rgb = WHITE
-        y += Inches(0.45)
+    # Right bullets
+    _add_bullets(slide, data.get("bullets", []), x=Inches(5.2), w=Inches(7.5), font_size=14, max_items=6)
+    # Chart if specified
+    chart_spec = data.get("chart")
+    if chart_spec:
+        _render_chart_from_spec(slide, chart_spec, CONTENT_LEFT, Inches(4.0), Inches(11.5), Inches(2.5))
+    _add_source_line(slide, data.get("source_ids", []))
 
 
-def _render_two_column(slide, company: str, data: dict, slide_num: int, total: int):
+def _render_two_column(slide, company, data, slide_num, total):
     _add_chrome(slide, company, data.get("title", ""), data.get("subtitle", ""), slide_num, total)
-
-    bullets = data.get("bullets", [])
-    mid = (len(bullets) + 1) // 2
-    left_bullets = bullets[:mid]
-    right_bullets = bullets[mid:]
-
-    # Left column
-    y = CONTENT_TOP
-    for b in left_bullets:
-        bb = slide.shapes.add_textbox(CONTENT_LEFT, y, Inches(5.8), Inches(0.4))
-        bf = bb.text_frame
-        bf.word_wrap = True
-        bp = bf.paragraphs[0]
-        bp.text = f"\u25B8  {b}"
-        bp.font.size = Pt(15)
-        bp.font.color.rgb = WHITE
-        y += Inches(0.45)
-
-    # Right column
-    y = CONTENT_TOP
-    for b in right_bullets:
-        bb = slide.shapes.add_textbox(Inches(7.0), y, Inches(5.8), Inches(0.4))
-        bf = bb.text_frame
-        bf.word_wrap = True
-        bp = bf.paragraphs[0]
-        bp.text = f"\u25B8  {b}"
-        bp.font.size = Pt(15)
-        bp.font.color.rgb = WHITE
-        y += Inches(0.45)
-
-    # Key stat
-    ks = data.get("key_stat", "")
-    if ks:
-        box = slide.shapes.add_shape(
-            MSO_SHAPE.ROUNDED_RECTANGLE,
-            CONTENT_LEFT, Inches(5.2), Inches(11.5), Inches(0.55)
-        )
-        box.fill.solid()
-        box.fill.fore_color.rgb = DARK_CARD
-        box.line.color.rgb = GOLD
-        box.line.width = Pt(1)
-        kt = box.text_frame
-        kp = kt.paragraphs[0]
-        kp.text = f"  \u2B50  {ks}"
-        kp.font.size = Pt(13)
-        kp.font.bold = True
-        kp.font.color.rgb = GOLD
+    table_spec = data.get("table_data")
+    if table_spec:
+        bullets = data.get("bullets", [])
+        if bullets:
+            _add_bullets(slide, bullets[:2], max_items=2, font_size=14)
+        _render_table_from_spec(slide, table_spec, CONTENT_LEFT, Inches(2.2), CONTENT_W)
+    else:
+        bullets = data.get("bullets", [])
+        mid = (len(bullets) + 1) // 2
+        _add_bullets(slide, bullets[:mid], w=Inches(5.8), max_items=6)
+        _add_bullets(slide, bullets[mid:], x=Inches(7.0), w=Inches(5.8), max_items=6)
+    _add_key_stat_box(slide, data.get("key_stat", ""))
+    _add_source_line(slide, data.get("source_ids", []))
 
 
-def _render_sources_slide(slide, company: str, data: dict, slide_num: int, total: int):
+def _render_sources_slide(slide, company, data, slide_num, total):
     _add_chrome(slide, company, "Sources Appendix", "Traceable evidence index", slide_num, total)
-
-    bullets = data.get("bullets", [])
-    y = CONTENT_TOP
-    for b in bullets[:8]:
-        bb = slide.shapes.add_textbox(CONTENT_LEFT, y, CONTENT_W, Inches(0.35))
-        bf = bb.text_frame
-        bp = bf.paragraphs[0]
-        bp.text = f"\u25B8  {b}"
-        bp.font.size = Pt(14)
-        bp.font.color.rgb = LIGHT_GRAY
-        y += Inches(0.4)
-
-    # Audit note
+    _add_bullets(slide, data.get("bullets", []), max_items=8, font_size=14)
     nb = slide.shapes.add_textbox(CONTENT_LEFT, Inches(5.5), CONTENT_W, Inches(0.3))
-    nf = nb.text_frame
-    np_ = nf.paragraphs[0]
-    np_.text = "Cross-reference all source IDs with the source panel for audit-ready citation trails."
-    np_.font.size = Pt(12)
-    np_.font.italic = True
-    np_.font.color.rgb = MID_GRAY
+    p = nb.text_frame.paragraphs[0]
+    p.text = "Cross-reference all source IDs with the source panel for audit-ready citation trails."
+    p.font.size = Pt(12)
+    p.font.italic = True
+    p.font.color.rgb = MID_GRAY
 
 
 # ═══════════════════════════════════════════════════════════════
-# Slide dispatcher
+# Visual spec renderers — execute LLM-decided visuals
+# ═══════════════════════════════════════════════════════════════
+
+def _render_chart_from_spec(slide, spec: dict, x, y, w, h):
+    """Render a chart from LLM-provided spec."""
+    chart_type = spec.get("type", "bar")
+    categories = spec.get("categories", [])
+    values = spec.get("values", [])
+    series = spec.get("series", [])
+
+    if not categories:
+        return
+
+    try:
+        if chart_type == "pie":
+            _add_pie_chart(slide, x, y, w, h, categories, values or [1] * len(categories))
+        elif chart_type == "doughnut":
+            _add_doughnut_chart(slide, x, y, w, h, categories, values or [1] * len(categories))
+        elif chart_type == "column" and series:
+            _add_column_chart(slide, x, y, w, h, categories, [(s.get("name", ""), s.get("values", [])) for s in series])
+        elif chart_type == "column":
+            _add_column_chart(slide, x, y, w, h, categories, [("Value", values)])
+        else:  # bar (default)
+            _add_bar_chart(slide, x, y, w, h, categories, values or [1] * len(categories))
+    except Exception:
+        pass  # Gracefully skip chart on error
+
+
+def _render_table_from_spec(slide, spec: dict, x, y, w):
+    """Render a table from LLM-provided spec."""
+    headers = spec.get("headers", [])
+    rows = spec.get("rows", [])
+    if headers and rows:
+        try:
+            _add_styled_table(slide, x, y, w, headers, rows[:8])
+        except Exception:
+            pass
+
+
+def _render_risk_blocks(slide, blocks: list[dict]):
+    """Render color-coded risk blocks."""
+    y = Inches(2.8)
+    block_w = Inches(3.7)
+    block_h = Inches(1.0)
+    gap = Inches(0.2)
+    for i, block in enumerate(blocks[:6]):
+        col = i % 3
+        row = i // 3
+        x = CONTENT_LEFT + (block_w + gap) * col
+        by = y + (block_h + gap) * row
+        _add_risk_block(slide, x, by, block_w, block_h,
+                        block.get("risk", ""), block.get("severity", "medium"))
+
+
+def _render_progress_bars(slide, bars: list[dict]):
+    """Render progress bars from spec."""
+    y = Inches(3.2)
+    for bar in bars[:6]:
+        pct = bar.get("value", 50)
+        label = bar.get("label", "")
+        color = ACCENT_TEAL if pct >= 70 else (ACCENT_AMBER if pct >= 40 else ACCENT_RED)
+        _add_progress_bar(slide, CONTENT_LEFT, y, Inches(10), Inches(0.3), pct, label, color)
+        y += Inches(0.5)
+
+
+def _extract_numeric(s: str) -> float:
+    """Extract a numeric value from a string like '$300M+', '42%', '4.5x'."""
+    m = re.search(r"[\d.]+", s.replace(",", ""))
+    return float(m.group()) if m else 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# Renderer dispatch
 # ═══════════════════════════════════════════════════════════════
 
 _RENDERERS = {
@@ -438,72 +691,158 @@ _RENDERERS = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# Mock slides
+# Mock slides — with visual specs for LLM to learn from
 # ═══════════════════════════════════════════════════════════════
 
 def _mock_slides(company: str, research: dict[str, Any]) -> dict[str, Any]:
-    sources = research.get("all_sources", [])
-    sids = [s["id"] for s in sources[:6]] or [1, 2, 3, 4, 5, 6]
+    src = research.get("all_sources", [])
+    sids = [s["id"] for s in src[:6]] or [1, 2, 3, 4, 5, 6]
     dm = research.get("dashboard_metrics", {}).get("metrics", [])
 
+    def _g(d, k, default=""):
+        return d.get(k, default) if isinstance(d, dict) else default
+
+    def _gl(d, k):
+        return d.get(k, []) if isinstance(d, dict) else []
+
     profile = research.get("company_profile", {})
+    mgmt = research.get("management_team", {})
     product = research.get("product_and_technology", {})
     bm = research.get("business_model", {})
-    fin = research.get("financial_signals", {})
     ue = research.get("unit_economics", {})
+    fin = research.get("financial_signals", {})
     ml = research.get("market_landscape", {})
     cp = research.get("competitive_positioning", {})
     ce = research.get("customer_evidence", {})
     risk = research.get("risk_assessment", {})
     cat = research.get("catalysts_and_outlook", {})
     iv = research.get("investment_view", {})
-    mgmt = research.get("management_team", {})
     comps = research.get("comparable_transactions", {})
     exit_d = research.get("exit_analysis", {})
 
-    def _get(d, k, default=""):
-        return d.get(k, default) if isinstance(d, dict) else default
-
-    def _get_list(d, k):
-        return d.get(k, []) if isinstance(d, dict) else []
-
-    # Build risk bullets
-    risk_bullets = [_get(risk, "summary")]
-    for r in _get_list(risk, "key_risks")[:3]:
+    # Build risk blocks
+    risk_blocks = []
+    for r in _gl(risk, "key_risks")[:4]:
         if isinstance(r, dict):
-            risk_bullets.append(f"{r.get('risk', '')} (Severity: {r.get('severity', 'N/A')}, Prob: {r.get('probability', 'N/A')})")
-        else:
-            risk_bullets.append(str(r))
+            risk_blocks.append({"risk": r.get("risk", "")[:60], "severity": r.get("severity", "medium")})
 
-    cat_bullets = [_get(cat, "summary")]
-    for c in _get_list(cat, "catalysts")[:3]:
-        if isinstance(c, dict):
-            cat_bullets.append(f"{c.get('catalyst', '')} — {c.get('timeline', '')}, Impact: {c.get('impact', '')}")
-        else:
-            cat_bullets.append(str(c))
+    # Build comp table
+    comp_headers = ["Company", "Type", "Valuation", "Multiple"]
+    comp_rows = []
+    for t in _gl(comps, "private_transactions")[:3]:
+        if isinstance(t, dict):
+            comp_rows.append([t.get("target", ""), "Private", t.get("deal_value", ""), t.get("revenue_multiple", "")])
+    for t in _gl(comps, "public_comps")[:3]:
+        if isinstance(t, dict):
+            comp_rows.append([t.get("company", ""), "Public", t.get("ev_revenue_multiple", ""), t.get("growth_rate", "")])
+
+    # Build competitive table
+    comp_pos_headers = ["Competitor", "Strengths", "Weaknesses", "Our Position"]
+    comp_pos_rows = []
+    for p in _gl(cp, "positioning_matrix")[:4]:
+        if isinstance(p, dict):
+            comp_pos_rows.append([p.get("competitor", ""), p.get("strengths", "")[:40], p.get("weaknesses", "")[:40], p.get("relative_position", "")[:40]])
+
+    # Revenue composition for pie chart
+    rev = _g(bm, "revenue_composition", {})
+    pie_cats = []
+    pie_vals = []
+    if isinstance(rev, dict):
+        for k, v in rev.items():
+            label = k.replace("_pct", "").replace("_", " ").title()
+            val = _extract_numeric(str(v))
+            if val > 0:
+                pie_cats.append(label)
+                pie_vals.append(val)
+
+    # Exit multiples for doughnut
+    exit_mults = _g(exit_d, "exit_multiples", {})
 
     return {"slides": [
-        {"slide_number": 1, "slide_type": "title", "title": company, "subtitle": "PE Due Diligence", "bullets": [], "key_stat": f"Est. ARR: {_get(fin, 'arr_trajectory', 'N/A')}", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 2, "slide_type": "exec_summary", "title": "Executive Summary", "subtitle": "Investment thesis overview", "bullets": [_get(profile, "summary"), _get(iv, "base_case"), _get(iv, "recommendation", "Proceed to detailed diligence")], "key_stat": _get(iv, "summary", "Compelling risk-adjusted return profile"), "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 3, "slide_type": "content", "title": "Company Profile", "subtitle": f"Founded {_get(profile, 'founded')} | HQ: {_get(profile, 'headquarters')}", "bullets": [_get(profile, "summary"), f"Employees: {_get(profile, 'employee_estimate')}", *_get_list(profile, "key_facts")[:3]], "key_stat": f"Employees: {_get(profile, 'employee_estimate')}", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 4, "slide_type": "content", "title": "Management Team", "subtitle": "Leadership quality and depth", "bullets": [_get(mgmt, "summary"), *[f"{e.get('name','')}: {e.get('background','')}" for e in _get_list(mgmt, 'executives')[:3]], f"Key-man risk: {_get(mgmt, 'key_man_risk')}"], "key_stat": "Repeat founder with prior exit", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 5, "slide_type": "content", "title": "Product & Technology", "subtitle": "Moat and differentiation analysis", "bullets": [_get(product, "summary"), *_get_list(product, "core_offerings")[:3], _get(product, "moat_hypothesis")], "key_stat": _get(product, "moat_hypothesis", "")[:80], "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 6, "slide_type": "content", "title": "Business Model", "subtitle": "Revenue mechanics and pricing", "bullets": [_get(bm, "summary"), f"Pricing: {_get(bm, 'pricing_motion')}", *_get_list(bm, "customer_segments")[:3]], "key_stat": "Land-and-expand with 130%+ NRR", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 7, "slide_type": "dashboard", "title": "Unit Economics & KPIs", "subtitle": "Key performance indicators", "bullets": [_get(ue, "summary")], "key_stat": "", "source_ids": sids, "dashboard_metrics": dm[:6]},
-        {"slide_number": 8, "slide_type": "dashboard", "title": "Financial Dashboard", "subtitle": "Traction signals and trajectory", "bullets": [_get(fin, "summary")], "key_stat": _get(fin, "arr_trajectory"), "source_ids": sids, "dashboard_metrics": dm[:6]},
-        {"slide_number": 9, "slide_type": "content", "title": "Market Landscape", "subtitle": f"TAM: {_get(ml, 'market_size_estimate', 'N/A')[:50]}", "bullets": [_get(ml, "summary"), f"Competitors: {', '.join(_get_list(ml, 'competitors')[:5])}", *_get_list(ml, "industry_trends")[:3]], "key_stat": _get(ml, "market_size_estimate"), "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 10, "slide_type": "two_column", "title": "Competitive Positioning", "subtitle": "Win/loss dynamics and differentiation", "bullets": [_get(cp, "summary"), *_get_list(cp, "key_differentiators")[:3], *[f"vs {p.get('competitor','')}: {p.get('relative_position','')}" for p in _get_list(cp, "positioning_matrix")[:3]]], "key_stat": "Differentiated on hybrid deployment + vendor neutrality", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 11, "slide_type": "content", "title": "Customer Evidence", "subtitle": "Logo quality and retention signals", "bullets": [_get(ce, "summary"), f"Concentration: {_get(ce, 'concentration_risk')}", f"NPS proxy: {_get(ce, 'nps_proxy')}", *_get_list(ce, "case_studies")[:2]], "key_stat": f"Logo retention: {_get(ce, 'churn_signals')[:60]}", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 12, "slide_type": "dashboard", "title": "Risk & Competitive Heatmap", "subtitle": "Downside scenario analysis", "bullets": risk_bullets[:2], "key_stat": _get(risk, "overall_risk_rating"), "source_ids": sids, "dashboard_metrics": dm[:6]},
-        {"slide_number": 13, "slide_type": "content", "title": "Catalysts & Outlook", "subtitle": "Value-creation levers", "bullets": cat_bullets, "key_stat": "Multiple catalysts within 12-24 month horizon", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 14, "slide_type": "content", "title": "Exit Analysis", "subtitle": "Strategic acquirers and IPO readiness", "bullets": [_get(exit_d, "summary"), *[f"{a.get('acquirer','')}: {a.get('rationale','')}" for a in _get_list(exit_d, "strategic_acquirers")[:3]], f"Bear: {_get(_get(exit_d, 'exit_multiples', {}), 'bear_case')}", f"Base: {_get(_get(exit_d, 'exit_multiples', {}), 'base_case')}", f"Bull: {_get(_get(exit_d, 'exit_multiples', {}), 'bull_case')}"], "key_stat": f"Base IRR: {_get(_get(exit_d, 'implied_irr', {}), 'base_case')}", "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 15, "slide_type": "exec_summary", "title": "Investment Recommendation", "subtitle": "IC decision framework", "bullets": [_get(iv, "base_case"), _get(iv, "upside_case"), _get(iv, "downside_case")], "key_stat": _get(iv, "recommendation", "PROCEED TO DETAILED DILIGENCE"), "source_ids": sids, "dashboard_metrics": []},
-        {"slide_number": 16, "slide_type": "sources", "title": "Sources Appendix", "subtitle": "Traceable evidence index", "bullets": ["All evidence points linked in the source panel.", "Cross-reference source IDs with each slide claim before IC review.", "Highlight unresolved data gaps as diligence follow-ups."], "key_stat": f"{len(_get_list(research, 'all_sources'))} cited sources", "source_ids": sids, "dashboard_metrics": []},
+        {"slide_number": 1, "slide_type": "title", "title": company, "subtitle": "PE Due Diligence",
+         "bullets": [], "key_stat": f"Est. ARR: {_g(fin, 'arr_trajectory', 'N/A')}", "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 2, "slide_type": "exec_summary", "title": "Executive Summary", "subtitle": "Investment thesis overview",
+         "bullets": [_g(profile, "summary"), _g(iv, "base_case"), _g(iv, "recommendation", "Proceed to diligence")],
+         "key_stat": _g(iv, "summary", "Compelling risk-adjusted return"),
+         "source_ids": sids, "dashboard_metrics": [],
+         "chart": {"type": "bar", "categories": ["ARR", "Growth", "NRR", "Margin", "LTV:CAC"],
+                   "values": [300, 45, 130, 75, 5]}},
+
+        {"slide_number": 3, "slide_type": "content", "title": "Company Profile", "subtitle": f"Founded {_g(profile, 'founded')} | HQ: {_g(profile, 'headquarters')}",
+         "bullets": [_g(profile, "summary"), f"Employees: {_g(profile, 'employee_estimate')}", *_gl(profile, "key_facts")[:3]],
+         "key_stat": f"Employees: {_g(profile, 'employee_estimate')}", "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 4, "slide_type": "content", "title": "Management Team", "subtitle": "Leadership quality and depth",
+         "bullets": [_g(mgmt, "summary"), *[f"{e.get('name','')}: {e.get('background','')[:80]}" for e in _gl(mgmt, 'executives')[:3]],
+                     f"Key-man risk: {_g(mgmt, 'key_man_risk')}"],
+         "key_stat": "Repeat founder with prior $300M+ exit", "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 5, "slide_type": "content", "title": "Product & Technology", "subtitle": "Moat and differentiation",
+         "bullets": [_g(product, "summary"), *_gl(product, "core_offerings")[:3], _g(product, "moat_hypothesis")[:120]],
+         "key_stat": _g(product, "moat_hypothesis", "")[:80], "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 6, "slide_type": "content", "title": "Business Model", "subtitle": "Revenue mechanics and pricing",
+         "bullets": [_g(bm, "summary"), f"Pricing: {_g(bm, 'pricing_motion')}", *_gl(bm, "customer_segments")[:2]],
+         "key_stat": "Land-and-expand with 130%+ NRR", "source_ids": sids, "dashboard_metrics": [],
+         "chart": {"type": "pie", "categories": pie_cats or ["Subscriptions", "Usage", "Services"],
+                   "values": pie_vals or [65, 30, 5]} if pie_cats else None},
+
+        {"slide_number": 7, "slide_type": "dashboard", "title": "Unit Economics & KPIs", "subtitle": "Key performance indicators",
+         "bullets": [_g(ue, "summary")], "key_stat": "", "source_ids": sids,
+         "dashboard_metrics": dm[:6],
+         "chart": {"type": "bar", "categories": ["NRR %", "Gross Margin %", "Rule of 40", "Logo Ret %"],
+                   "values": [130, 75, 60, 93]}},
+
+        {"slide_number": 8, "slide_type": "dashboard", "title": "Financial Dashboard", "subtitle": "Traction and trajectory",
+         "bullets": [_g(fin, "summary")], "key_stat": _g(fin, "arr_trajectory"), "source_ids": sids,
+         "dashboard_metrics": dm[:6]},
+
+        {"slide_number": 9, "slide_type": "content", "title": "Market Landscape", "subtitle": f"TAM: {_g(ml, 'market_size_estimate', '')[:50]}",
+         "bullets": [_g(ml, "summary"), f"Competitors: {', '.join(_gl(ml, 'competitors')[:5])}", *_gl(ml, "industry_trends")[:3]],
+         "key_stat": _g(ml, "market_size_estimate"), "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 10, "slide_type": "two_column", "title": "Competitive Positioning", "subtitle": "Win/loss and differentiation",
+         "bullets": [_g(cp, "summary"), *_gl(cp, "key_differentiators")[:3]],
+         "key_stat": "Differentiated on hybrid deployment + vendor neutrality", "source_ids": sids, "dashboard_metrics": [],
+         "table_data": {"headers": comp_pos_headers, "rows": comp_pos_rows} if comp_pos_rows else None},
+
+        {"slide_number": 11, "slide_type": "content", "title": "Comparable Transactions", "subtitle": "Valuation benchmarks",
+         "bullets": [_g(comps, "summary"), f"Implied range: {_g(comps, 'implied_valuation_range')}"],
+         "key_stat": _g(comps, "implied_valuation_range"), "source_ids": sids, "dashboard_metrics": [],
+         "table_data": {"headers": comp_headers, "rows": comp_rows} if comp_rows else None},
+
+        {"slide_number": 12, "slide_type": "content", "title": "Customer Evidence", "subtitle": "Logo quality and retention",
+         "bullets": [_g(ce, "summary"), f"Concentration: {_g(ce, 'concentration_risk')}", f"NPS: {_g(ce, 'nps_proxy')}", *_gl(ce, "case_studies")[:2]],
+         "key_stat": f"Logo retention: {_g(ce, 'churn_signals')[:60]}", "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 13, "slide_type": "dashboard", "title": "Risk Heatmap", "subtitle": "Downside scenario analysis",
+         "bullets": [_g(risk, "summary")],
+         "key_stat": _g(risk, "overall_risk_rating"), "source_ids": sids,
+         "dashboard_metrics": dm[:6],
+         "risk_blocks": risk_blocks},
+
+        {"slide_number": 14, "slide_type": "content", "title": "Catalysts & Outlook", "subtitle": "Value-creation levers",
+         "bullets": [_g(cat, "summary"), *[f"{c.get('catalyst','')}: {c.get('impact','')}" for c in _gl(cat, "catalysts")[:3] if isinstance(c, dict)]],
+         "key_stat": "Multiple catalysts within 12-24 months", "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 15, "slide_type": "content", "title": "Exit Analysis", "subtitle": "Strategic acquirers and IPO readiness",
+         "bullets": [_g(exit_d, "summary"), *[f"{a.get('acquirer','')}: {a.get('rationale','')[:60]}" for a in _gl(exit_d, "strategic_acquirers")[:3] if isinstance(a, dict)]],
+         "key_stat": f"Base IRR: {_g(_g(exit_d, 'implied_irr', {}), 'base_case')}", "source_ids": sids, "dashboard_metrics": [],
+         "chart": {"type": "doughnut", "categories": ["Bear Case", "Base Case", "Bull Case"], "values": [25, 50, 25]}},
+
+        {"slide_number": 16, "slide_type": "exec_summary", "title": "Investment Recommendation", "subtitle": "IC decision framework",
+         "bullets": [_g(iv, "base_case"), _g(iv, "upside_case"), _g(iv, "downside_case")],
+         "key_stat": _g(iv, "recommendation", "PROCEED TO DETAILED DILIGENCE"), "source_ids": sids, "dashboard_metrics": []},
+
+        {"slide_number": 17, "slide_type": "sources", "title": "Sources Appendix", "subtitle": "Traceable evidence index",
+         "bullets": ["All evidence points linked in source panel.", "Cross-reference source IDs before IC review.", "Highlight data gaps as follow-ups."],
+         "key_stat": f"{len(_gl(research, 'all_sources'))} cited sources", "source_ids": sids, "dashboard_metrics": []},
     ]}
 
 
 # ═══════════════════════════════════════════════════════════════
-# Gemini slide generation
+# Gemini slide generation — now with visual toolkit
 # ═══════════════════════════════════════════════════════════════
 
 def _slides_from_gemini(company: str, research: dict[str, Any]) -> dict[str, Any]:
@@ -511,11 +850,28 @@ def _slides_from_gemini(company: str, research: dict[str, Any]) -> dict[str, Any
         return _mock_slides(company, research)
 
     client = genai.Client(api_key=settings.gemini_api_key)
-    prompt = f"""You are an elite private-equity presentation strategist at McKinsey.
+    prompt = f"""You are an elite PE presentation strategist at McKinsey.
 Create strict JSON for a high-stakes IC due diligence deck.
 
 Company: {company}
 Research: {json.dumps(research)}
+
+You have a VISUAL TOOLKIT. For each slide, you can specify:
+
+1. **chart** (optional): Add a data visualization
+   - {{"type": "bar", "categories": ["A","B","C"], "values": [10,20,30]}}
+   - {{"type": "pie", "categories": ["Subs","Usage","Services"], "values": [65,30,5]}}
+   - {{"type": "doughnut", "categories": ["Bear","Base","Bull"], "values": [25,50,25]}}
+   - {{"type": "column", "categories": ["Q1","Q2"], "series": [{{"name": "Rev", "values": [10,20]}}]}}
+
+2. **table_data** (optional): Add a styled table
+   - {{"headers": ["Company","Multiple","Growth"], "rows": [["SNOW","12x","30%"],["DDOG","15x","25%"]]}}
+
+3. **risk_blocks** (optional): Color-coded risk severity grid
+   - [{{"risk": "Competition from MSFT", "severity": "High"}}, {{"risk": "Margin pressure", "severity": "Medium"}}]
+
+4. **progress_bars** (optional): Metric progress bars
+   - [{{"label": "NRR", "value": 85}}, {{"label": "Gross Margin", "value": 75}}]
 
 Return schema:
 {{
@@ -525,25 +881,27 @@ Return schema:
       "slide_type": "title|exec_summary|content|dashboard|two_column|sources",
       "title": "...",
       "subtitle": "...",
-      "bullets": ["quant-heavy bullet", "...", "..."],
+      "bullets": ["quant-heavy bullet"],
       "key_stat": "most important insight",
       "source_ids": [1,2,3],
-      "dashboard_metrics": [{{"label": "...", "value": "...", "trend": "up|down|flat"}}]
+      "dashboard_metrics": [{{"label": "...", "value": "...", "trend": "up|down|flat"}}],
+      "chart": null,
+      "table_data": null,
+      "risk_blocks": null,
+      "progress_bars": null
     }}
   ]
 }}
 
 RULES:
-- 14 to 20 slides.
-- slide_type assignments: slide 1 = "title", slide 2 = "exec_summary", last = "sources",
-  any slide with 4+ KPI metrics = "dashboard" (need 3+ dashboard slides),
-  competitive analysis = "two_column", investment recommendation = "exec_summary", rest = "content".
-- Every bullet must be quantitative and investor-grade.
-- Every slide needs 3+ bullets and 2+ source_ids.
-- dashboard_metrics only on dashboard slides (4-6 metrics each).
-- Ensure flow: title -> exec summary -> profile -> mgmt -> product -> business model ->
-  unit economics -> financials -> market -> competition -> customers -> dashboards -> risks ->
-  catalysts -> exit -> investment view -> sources.
+- 14-20 slides.
+- Slide 1 = "title", slide 2 = "exec_summary", last = "sources".
+- 3+ dashboard slides with dashboard_metrics AND charts.
+- USE CHARTS: revenue composition = pie, exit scenarios = doughnut, KPIs = bar, financial trends = column.
+- USE TABLES: competitive positioning and comparable transactions MUST use table_data.
+- USE RISK BLOCKS: risk assessment slide MUST use risk_blocks.
+- Every non-title/sources slide needs 3+ bullets and 2+ source_ids.
+- Make it VISUALLY IMMERSIVE — every 2nd slide should have a chart, table, or visual element.
 """
     feedback = ""
     best: dict[str, Any] | None = None
@@ -554,18 +912,14 @@ RULES:
         response = client.models.generate_content(
             model=settings.gemini_slide_model,
             contents=run_prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.15,
-                response_mime_type="application/json",
-            ),
+            config=types.GenerateContentConfig(temperature=0.15, response_mime_type="application/json"),
         )
         raw = response.text or ""
         if not raw:
             feedback = "Empty response."
             continue
         try:
-            cleaned = raw.strip().strip("```json").strip("```").strip()
-            parsed = json.loads(cleaned)
+            parsed = json.loads(raw.strip().strip("```json").strip("```").strip())
         except Exception:
             feedback = "Invalid JSON."
             continue
@@ -598,6 +952,10 @@ def _normalize_slides(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "key_stat": s.get("key_stat") or "",
             "source_ids": [sid for sid in (s.get("source_ids") or []) if sid][:8],
             "dashboard_metrics": (s.get("dashboard_metrics") or [])[:6],
+            "chart": s.get("chart"),
+            "table_data": s.get("table_data"),
+            "risk_blocks": s.get("risk_blocks"),
+            "progress_bars": s.get("progress_bars"),
         })
     return out[:24]
 
@@ -612,9 +970,13 @@ def _evaluate_slide_quality(slides: list[dict[str, Any]]) -> tuple[bool, list[st
     if dash < 3:
         issues.append(f"Need 3+ dashboard slides, got {dash}")
         score -= 15
+    # Count visual elements
+    visuals = sum(1 for s in slides if s.get("chart") or s.get("table_data") or s.get("risk_blocks") or s.get("progress_bars"))
+    if visuals < 3:
+        issues.append(f"Need 3+ slides with visual elements (charts/tables/risk blocks), got {visuals}")
+        score -= 10
     for i, s in enumerate(slides, 1):
         stype = s.get("slide_type", "content")
-        # Title and sources slides are exempt from bullet/source requirements
         if stype in ("title", "sources"):
             continue
         if len(s.get("bullets", [])) < 2:
@@ -634,20 +996,15 @@ def _create_pptx(company: str, slides: list[dict[str, Any]]) -> bytes:
     prs = Presentation()
     prs.slide_width = SLIDE_W
     prs.slide_height = SLIDE_H
-
     total = len(slides)
     for data in slides:
-        slide_layout = prs.slide_layouts[6]  # blank
-        slide = prs.slides.add_slide(slide_layout)
-
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
         stype = data.get("slide_type", "content")
         renderer = _RENDERERS.get(stype, _render_content_slide)
-
         if stype == "title":
             renderer(slide, company, data, total)
         else:
             renderer(slide, company, data, data["slide_number"], total)
-
     buf = BytesIO()
     prs.save(buf)
     return buf.getvalue()

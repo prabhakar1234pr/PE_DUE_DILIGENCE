@@ -26,9 +26,12 @@ class SlideItem(BaseModel):
     slide_type: str = "content"
     source_ids: list[int] = Field(default_factory=list)
     dashboard_metrics: list[dict] = Field(default_factory=list)
+    chart: dict | None = None
+    table_data: dict | None = None
+    risk_blocks: list[dict] | None = None
+    progress_bars: list[dict] | None = None
 
     def model_post_init(self, __context: object) -> None:
-        # Coerce None to empty string so frontend never sees null
         if self.subtitle is None:
             self.subtitle = ""
         if self.key_stat is None:
