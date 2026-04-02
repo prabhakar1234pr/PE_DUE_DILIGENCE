@@ -3,4 +3,5 @@ uvicorn[standard]
 google-genai
 google-cloud-storage
 python-pptx
+requests
 pytest
