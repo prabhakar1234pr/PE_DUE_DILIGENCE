@@ -45,7 +45,17 @@ type StreamEvent = {
   timestamp: number;
 };
 
+type HistoryItem = {
+  run_id: string;
+  company: string;
+  started_at: string;
+  finding_count: number;
+  source_count: number;
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const LS_LAST_RUN = "pe_dd_last_run";
+const LS_LAST_RESULT = "pe_dd_last_result";
 
 /* ─── Small SVG Icons (inline to avoid deps) ────────────────── */
 
@@ -276,6 +286,9 @@ export default function Home() {
   const [selectedSource, setSelectedSource] = useState<number | null>(null);
   const [currentSlideIdx, setCurrentSlideIdx] = useState(0);
   const [streamEvents, setStreamEvents] = useState<StreamEvent[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const revealRootRef = useRef<HTMLDivElement>(null);
   const revealInstanceRef = useRef<InstanceType<typeof Reveal> | null>(null);
@@ -286,6 +299,72 @@ export default function Home() {
     (result?.sources || []).forEach((s) => map.set(s.id, s));
     return map;
   }, [result?.sources]);
+
+  /* ── Restore last session from localStorage on mount ─────── */
+  useEffect(() => {
+    try {
+      const savedResult = localStorage.getItem(LS_LAST_RESULT);
+      const savedCompany = localStorage.getItem(LS_LAST_RUN);
+      if (savedResult && savedCompany) {
+        setResult(JSON.parse(savedResult));
+        setCompany(savedCompany);
+        setStatus1("done");
+        setStatus2("done");
+        setStatus3("done");
+      }
+    } catch {
+      // Ignore corrupted localStorage
+    }
+  }, []);
+
+  /* ── Fetch history on mount ────────────────────────────────── */
+  useEffect(() => {
+    fetch(`${API_URL}/api/runs`)
+      .then((r) => (r.ok ? r.json() : { runs: [] }))
+      .then((data) => setHistory(data.runs || []))
+      .catch(() => setHistory([]));
+  }, []);
+
+  /* ── Save to localStorage when result changes ──────────────── */
+  useEffect(() => {
+    if (result && company) {
+      try {
+        localStorage.setItem(LS_LAST_RESULT, JSON.stringify(result));
+        localStorage.setItem(LS_LAST_RUN, company);
+      } catch {
+        // localStorage full or unavailable — ignore
+      }
+      // Refresh history list
+      fetch(`${API_URL}/api/runs`)
+        .then((r) => (r.ok ? r.json() : { runs: [] }))
+        .then((data) => setHistory(data.runs || []))
+        .catch(() => {});
+    }
+  }, [result, company]);
+
+  /* ── Load a past run from history ──────────────────────────── */
+  const loadRun = useCallback(async (runId: string, companyName: string) => {
+    setLoadingHistory(true);
+    setShowHistory(false);
+    try {
+      const resp = await fetch(`${API_URL}/api/runs/${runId}`);
+      if (!resp.ok) throw new Error("Failed to load run");
+      const data = (await resp.json()) as ApiResponse;
+      setResult(data);
+      setCompany(companyName);
+      setStatus1("done");
+      setStatus2("done");
+      setStatus3("done");
+      setError("");
+      setStreamEvents([]);
+      localStorage.setItem(LS_LAST_RESULT, JSON.stringify(data));
+      localStorage.setItem(LS_LAST_RUN, companyName);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load history");
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
 
   /* ── Reveal.js lifecycle ──────────────────────────────────── */
 
@@ -788,21 +867,70 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ── Sources Panel ── */}
+          {/* ── Sources + History Panel ── */}
           <aside className="flex w-[380px] shrink-0 flex-col bg-[var(--navy)]">
             <div className="flex items-center justify-between border-b border-[var(--slate-border)] px-5 py-3">
-              <h2 className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-                Sources
-              </h2>
-              {result?.sources && result.sources.length > 0 && (
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className={`text-xs font-semibold uppercase tracking-widest transition-colors ${!showHistory ? "text-[var(--gold)]" : "text-[var(--text-muted)] hover:text-white"}`}
+                >
+                  Sources
+                </button>
+                <button
+                  onClick={() => setShowHistory(true)}
+                  className={`text-xs font-semibold uppercase tracking-widest transition-colors ${showHistory ? "text-[var(--gold)]" : "text-[var(--text-muted)] hover:text-white"}`}
+                >
+                  History
+                </button>
+              </div>
+              {!showHistory && result?.sources && result.sources.length > 0 && (
                 <span className="rounded-md bg-[var(--navy-card)] px-2 py-0.5 text-xs font-mono text-[var(--gold)]">
                   {result.sources.length} cited
+                </span>
+              )}
+              {showHistory && history.length > 0 && (
+                <span className="rounded-md bg-[var(--navy-card)] px-2 py-0.5 text-xs font-mono text-[var(--gold)]">
+                  {history.length} runs
                 </span>
               )}
             </div>
 
             <div className="flex-1 overflow-y-auto px-4 py-3">
-              {!result && (
+              {/* ── History tab ── */}
+              {showHistory && (
+                <div className="space-y-2">
+                  {history.length === 0 && (
+                    <p className="py-8 text-center text-sm text-[var(--text-muted)]">
+                      No past research runs yet.
+                    </p>
+                  )}
+                  {history.map((item) => (
+                    <button
+                      key={item.run_id}
+                      onClick={() => loadRun(item.run_id, item.company)}
+                      disabled={loadingHistory}
+                      className="w-full rounded-lg border border-[var(--slate-border)] p-3 text-left transition-all hover:border-[var(--gold-dim)]/40 hover:bg-[var(--navy-light)] disabled:opacity-50"
+                    >
+                      <p className="text-sm font-semibold text-white">{item.company}</p>
+                      <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--text-muted)]">
+                        <span>{new Date(item.started_at).toLocaleDateString()}</span>
+                        <span>{item.source_count} sources</span>
+                        <span>{item.finding_count} sections</span>
+                      </div>
+                    </button>
+                  ))}
+                  {loadingHistory && (
+                    <div className="flex items-center justify-center py-4">
+                      <span className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--gold)] border-t-transparent" />
+                      <span className="ml-2 text-xs text-[var(--text-muted)]">Loading report...</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Sources tab ── */}
+              {!showHistory && !result && (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <p className="text-sm text-[var(--text-muted)]">
                     Sources will appear here after generating a report.
@@ -810,7 +938,7 @@ export default function Home() {
                 </div>
               )}
 
-              {result?.sources && (
+              {!showHistory && result?.sources && (
                 <div className="space-y-2">
                   {result.sources.map((source) => {
                     const isSelected = selectedSource === source.id;
@@ -852,7 +980,7 @@ export default function Home() {
                 </div>
               )}
 
-              {selectedSource !== null && !sourceMap.has(selectedSource) && (
+              {!showHistory && selectedSource !== null && !sourceMap.has(selectedSource) && (
                 <p className="mt-3 rounded-lg border border-amber-800/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
                   Citation [{selectedSource}] not found in the source list.
                 </p>

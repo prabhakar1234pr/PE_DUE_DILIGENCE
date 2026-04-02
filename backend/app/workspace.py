@@ -294,3 +294,48 @@ def get_full_workspace(run_id: str) -> dict[str, Any]:
         "risks": get_risks(run_id),
         "sources": get_sources_reindexed(run_id),
     }
+
+
+# ── History / session queries ────────────────────────────────
+
+def list_runs(limit: int = 50) -> list[dict[str, Any]]:
+    """List all research runs, newest first."""
+    rows = _conn().execute(
+        """SELECT run_id, company, MIN(created_at) as started_at,
+                  COUNT(*) as finding_count
+           FROM research_findings
+           GROUP BY run_id, company
+           ORDER BY MIN(created_at) DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    result = []
+    for r in rows:
+        source_count = _conn().execute(
+            "SELECT COUNT(*) FROM sources WHERE run_id=?", (r["run_id"],)
+        ).fetchone()[0]
+        result.append({
+            "run_id": r["run_id"],
+            "company": r["company"],
+            "started_at": r["started_at"],
+            "finding_count": r["finding_count"],
+            "source_count": source_count,
+        })
+    return result
+
+
+def get_run_company(run_id: str) -> str | None:
+    """Get the company name for a given run_id."""
+    row = _conn().execute(
+        "SELECT company FROM research_findings WHERE run_id=? LIMIT 1", (run_id,)
+    ).fetchone()
+    return row["company"] if row else None
+
+
+def run_exists(run_id: str) -> bool:
+    """Check if a run_id exists in the workspace."""
+    row = _conn().execute(
+        "SELECT COUNT(*) FROM research_findings WHERE run_id=?", (run_id,)
+    ).fetchone()
+    return row[0] > 0

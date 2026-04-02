@@ -38,6 +38,18 @@ class SlideItem(BaseModel):
             self.key_stat = ""
 
 
+class RunListItem(BaseModel):
+    run_id: str
+    company: str
+    started_at: str
+    finding_count: int = 0
+    source_count: int = 0
+
+
+class RunListResponse(BaseModel):
+    runs: list[RunListItem]
+
+
 class ResearchResponse(BaseModel):
     company: str
     generated_at: str

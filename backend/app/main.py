@@ -8,10 +8,10 @@ from fastapi.responses import StreamingResponse
 
 from app.agent_analyst import run_analyst
 from app.agent_ppt import build_presentation
-from app.agent_research import run_research, run_research_stream
-from app.schemas import HealthResponse, ResearchRequest, ResearchResponse
+from app.agent_research import run_research, run_research_stream, _assemble_research
+from app.schemas import HealthResponse, ResearchRequest, ResearchResponse, RunListResponse
 from app.storage import save_pptx_and_get_url
-from app.workspace import get_full_workspace, new_run_id
+from app.workspace import get_full_workspace, list_runs, new_run_id, run_exists
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,6 +30,42 @@ app.add_middleware(
 @app.get("/api/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
     return HealthResponse(status="ok", service="fastapi-backend")
+
+
+@app.get("/api/runs", response_model=RunListResponse)
+def get_runs() -> RunListResponse:
+    """List all past research runs."""
+    return RunListResponse(runs=list_runs(limit=50))
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str):
+    """Retrieve a past research run by run_id. Reassembles from workspace DB."""
+    if not run_exists(run_id):
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    try:
+        research = _assemble_research(
+            company=run_id.rsplit("-", 2)[0].replace("-", " ").title(),
+            run_id=run_id,
+        )
+        company = research.get("company", "Unknown")
+        workspace = get_full_workspace(run_id)
+
+        slide_payload, presentation = build_presentation(company, research, workspace)
+        pptx_url = save_pptx_and_get_url(company, presentation)
+
+        return ResearchResponse(
+            company=company,
+            generated_at=research.get("_created_at", datetime.now(UTC).isoformat()),
+            research_summary=research,
+            slides=slide_payload["slides"],
+            sources=research.get("all_sources", []),
+            pptx_url=pptx_url,
+        )
+    except Exception as exc:
+        logger.exception("Failed to reload run %s", run_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/research", response_model=ResearchResponse)
