@@ -1010,8 +1010,67 @@ def _create_pptx(company: str, slides: list[dict[str, Any]]) -> bytes:
     return buf.getvalue()
 
 
-def build_presentation(company: str, research: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+def build_presentation(company: str, research: dict[str, Any],
+                       workspace: dict[str, Any] | None = None) -> tuple[dict[str, Any], bytes]:
     payload = _slides_from_gemini(company, research)
     slides = _normalize_slides(payload["slides"])
+
+    # Enrich slides with workspace datasets (charts, tables, risks from Analyst agent)
+    if workspace:
+        slides = _enrich_slides_from_workspace(slides, workspace)
+
     pptx = _create_pptx(company, slides)
     return {"slides": slides}, pptx
+
+
+def _enrich_slides_from_workspace(slides: list[dict[str, Any]],
+                                  workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    """Inject analyst-structured data into slides that don't already have visuals."""
+    charts = {c["chart_name"]: c for c in workspace.get("charts", [])}
+    tables = {t["table_name"]: t for t in workspace.get("tables", [])}
+    risks = workspace.get("risks", [])
+
+    for slide in slides:
+        title_lower = (slide.get("title") or "").lower()
+        stype = slide.get("slide_type", "content")
+
+        # Skip slides that already have visual specs from Gemini
+        if slide.get("chart") or slide.get("table_data") or slide.get("risk_blocks"):
+            continue
+
+        # Match charts by slide title keywords
+        if "executive summary" in title_lower and "headline_metrics" in charts:
+            c = charts["headline_metrics"]
+            slide["chart"] = {"type": c["chart_type"], "categories": c["categories"], "values": c["values"]}
+        elif ("unit economics" in title_lower or "kpi" in title_lower) and "kpi_comparison" in charts:
+            c = charts["kpi_comparison"]
+            slide["chart"] = {"type": c["chart_type"], "categories": c["categories"], "values": c["values"]}
+        elif "business model" in title_lower and "revenue_composition" in charts:
+            c = charts["revenue_composition"]
+            slide["chart"] = {"type": c["chart_type"], "categories": c["categories"], "values": c["values"]}
+        elif "financial" in title_lower and "funding_timeline" in charts:
+            c = charts["funding_timeline"]
+            slide["chart"] = {"type": c["chart_type"], "categories": c["categories"], "values": c["values"]}
+        elif "exit" in title_lower and "exit_scenarios" in charts:
+            c = charts["exit_scenarios"]
+            slide["chart"] = {"type": c["chart_type"], "categories": c["categories"], "values": c["values"]}
+
+        # Match tables by slide title keywords
+        if "competitive" in title_lower and "competitive_positioning" in tables:
+            t = tables["competitive_positioning"]
+            slide["table_data"] = {"headers": t["headers"], "rows": t["rows"]}
+        elif "comparable" in title_lower and "comparable_transactions" in tables:
+            t = tables["comparable_transactions"]
+            slide["table_data"] = {"headers": t["headers"], "rows": t["rows"]}
+        elif "management" in title_lower and "management_team" in tables:
+            t = tables["management_team"]
+            slide["table_data"] = {"headers": t["headers"], "rows": t["rows"]}
+        elif "funding" in title_lower and "funding_rounds" in tables:
+            t = tables["funding_rounds"]
+            slide["table_data"] = {"headers": t["headers"], "rows": t["rows"]}
+
+        # Match risk blocks
+        if "risk" in title_lower and risks and not slide.get("risk_blocks"):
+            slide["risk_blocks"] = [{"risk": r["risk"][:60], "severity": r["severity"]} for r in risks[:6]]
+
+    return slides

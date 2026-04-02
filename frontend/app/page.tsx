@@ -270,6 +270,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [status1, setStatus1] = useState<AgentStatus>("idle");
   const [status2, setStatus2] = useState<AgentStatus>("idle");
+  const [status3, setStatus3] = useState<AgentStatus>("idle");
   const [error, setError] = useState("");
   const [result, setResult] = useState<ApiResponse | null>(null);
   const [selectedSource, setSelectedSource] = useState<number | null>(null);
@@ -361,6 +362,7 @@ export default function Home() {
     setStreamEvents([]);
     setStatus1("running");
     setStatus2("idle");
+    setStatus3("idle");
 
     const addEvent = (type: StreamEvent["type"], data: string) => {
       setStreamEvents((prev) => [...prev, { type, data, timestamp: Date.now() }]);
@@ -402,14 +404,26 @@ export default function Home() {
               const parsed = JSON.parse(rawData);
 
               if (currentEventType === "done") {
-                // Final result — same shape as /api/research response
                 setResult(parsed as ApiResponse);
                 setStatus1("done");
                 setStatus2("done");
+                setStatus3("done");
                 addEvent("progress", "Report complete!");
+              } else if (currentEventType === "agent") {
+                // Agent transition events
+                const agentName = typeof parsed === "string" ? parsed : "";
+                if (agentName === "analyst") {
+                  setStatus1("done");
+                  setStatus2("running");
+                  addEvent("progress", "Starting data analyst agent...");
+                } else if (agentName === "ppt") {
+                  setStatus2("done");
+                  setStatus3("running");
+                  addEvent("progress", "Starting presentation agent...");
+                }
               } else if (currentEventType === "slides") {
-                setStatus1("done");
-                setStatus2("running");
+                setStatus2("done");
+                setStatus3("running");
                 addEvent("slides", typeof parsed === "string" ? parsed : "Building slides...");
               } else if (currentEventType === "error") {
                 addEvent("error", typeof parsed === "string" ? parsed : "Unknown error");
@@ -560,10 +574,24 @@ export default function Home() {
 
             <div className="flex items-center gap-3 rounded-lg border border-[var(--slate-border)] bg-[var(--navy-light)] px-4 py-2.5">
               <div className="flex items-center gap-2">
-                <IconChart className="h-4 w-4 text-[var(--gold)]" />
-                <span className="text-xs font-medium text-white">Presentation Agent</span>
+                <svg className="h-4 w-4 text-[var(--gold)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <span className="text-xs font-medium text-white">Data Analyst</span>
               </div>
               <AgentStatusBadge status={status2} />
+            </div>
+
+            <svg className="h-4 w-6 text-[var(--slate-border)]" viewBox="0 0 24 16" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path d="M2 8h16m0 0l-4-4m4 4l-4 4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+
+            <div className="flex items-center gap-3 rounded-lg border border-[var(--slate-border)] bg-[var(--navy-light)] px-4 py-2.5">
+              <div className="flex items-center gap-2">
+                <IconChart className="h-4 w-4 text-[var(--gold)]" />
+                <span className="text-xs font-medium text-white">Presentation</span>
+              </div>
+              <AgentStatusBadge status={status3} />
             </div>
           </div>
 
