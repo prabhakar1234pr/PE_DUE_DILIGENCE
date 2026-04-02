@@ -386,72 +386,96 @@ export default function Home() {
       const decoder = new TextDecoder();
       let buffer = "";
 
+      // SSE parser that handles large multi-chunk data payloads.
+      // An SSE message ends with a blank line (\n\n). We accumulate
+      // data lines until we see a blank line, then process the full message.
+      const processMessage = (eventType: string, dataStr: string) => {
+        if (!eventType || !dataStr) return;
+        try {
+          const parsed = JSON.parse(dataStr);
+
+          if (eventType === "done") {
+            setResult(parsed as ApiResponse);
+            setStatus1("done");
+            setStatus2("done");
+            setStatus3("done");
+            addEvent("progress", "Report complete!");
+          } else if (eventType === "agent") {
+            const agentName = typeof parsed === "string" ? parsed : "";
+            if (agentName === "analyst") {
+              setStatus1("done");
+              setStatus2("running");
+              addEvent("progress", "Starting data analyst agent...");
+            } else if (agentName === "ppt") {
+              setStatus2("done");
+              setStatus3("running");
+              addEvent("progress", "Starting presentation agent...");
+            }
+          } else if (eventType === "slides") {
+            setStatus2("done");
+            setStatus3("running");
+            addEvent("slides", typeof parsed === "string" ? parsed : "Building slides...");
+          } else if (eventType === "error") {
+            addEvent("error", typeof parsed === "string" ? parsed : "Unknown error");
+          } else if (eventType === "source") {
+            addEvent("source", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+          } else if (eventType === "attempt") {
+            addEvent("attempt", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+          } else {
+            addEvent(
+              eventType as StreamEvent["type"],
+              typeof parsed === "string" ? parsed : JSON.stringify(parsed)
+            );
+          }
+        } catch {
+          // Ignore unparseable data
+        }
+      };
+
+      // Accumulate SSE messages across chunks. An SSE message is:
+      //   event: <type>\n
+      //   data: <json>\n
+      //   \n  (blank line = end of message)
+      let pendingEvent = "";
+      let pendingData = "";
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
 
-        let currentEventType = "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            currentEventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ") && currentEventType) {
-            const rawData = line.slice(6);
-            try {
-              const parsed = JSON.parse(rawData);
+        // Process complete lines from the buffer
+        let nlIdx: number;
+        while ((nlIdx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nlIdx).trim();
+          buffer = buffer.slice(nlIdx + 1);
 
-              if (currentEventType === "done") {
-                setResult(parsed as ApiResponse);
-                setStatus1("done");
-                setStatus2("done");
-                setStatus3("done");
-                addEvent("progress", "Report complete!");
-              } else if (currentEventType === "agent") {
-                // Agent transition events
-                const agentName = typeof parsed === "string" ? parsed : "";
-                if (agentName === "analyst") {
-                  setStatus1("done");
-                  setStatus2("running");
-                  addEvent("progress", "Starting data analyst agent...");
-                } else if (agentName === "ppt") {
-                  setStatus2("done");
-                  setStatus3("running");
-                  addEvent("progress", "Starting presentation agent...");
-                }
-              } else if (currentEventType === "slides") {
-                setStatus2("done");
-                setStatus3("running");
-                addEvent("slides", typeof parsed === "string" ? parsed : "Building slides...");
-              } else if (currentEventType === "error") {
-                addEvent("error", typeof parsed === "string" ? parsed : "Unknown error");
-              } else if (currentEventType === "source") {
-                // Source data is already an object, stringify for the feed
-                addEvent("source", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
-              } else if (currentEventType === "attempt") {
-                addEvent("attempt", typeof parsed === "string" ? parsed : JSON.stringify(parsed));
-              } else {
-                addEvent(
-                  currentEventType as StreamEvent["type"],
-                  typeof parsed === "string" ? parsed : JSON.stringify(parsed)
-                );
-              }
-            } catch {
-              // raw string data
-              addEvent(currentEventType as StreamEvent["type"], rawData);
+          if (line === "") {
+            // Blank line = end of SSE message → process it
+            if (pendingEvent && pendingData) {
+              processMessage(pendingEvent, pendingData);
             }
-            currentEventType = "";
+            pendingEvent = "";
+            pendingData = "";
+          } else if (line.startsWith("event:")) {
+            // New event type — if we had a pending message, flush it first
+            if (pendingEvent && pendingData) {
+              processMessage(pendingEvent, pendingData);
+              pendingData = "";
+            }
+            pendingEvent = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            // Accumulate data (handles multi-line data fields)
+            const chunk = line.slice(5).trimStart();
+            pendingData = pendingData ? pendingData + chunk : chunk;
           }
         }
       }
 
-      // If we never got a "done" event, something went wrong
-      if (!result) {
-        // Check if status was already set
-        setStatus1((prev) => (prev === "done" ? prev : "error"));
-        setStatus2((prev) => (prev === "done" ? prev : "error"));
+      // Flush any remaining message after stream ends
+      if (pendingEvent && pendingData) {
+        processMessage(pendingEvent, pendingData);
       }
     } catch (err) {
       setStatus1((prev) => (prev === "done" ? "done" : "error"));
