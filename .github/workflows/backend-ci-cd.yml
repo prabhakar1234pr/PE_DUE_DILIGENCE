@@ -52,6 +52,8 @@ jobs:
           service: pe-dd-backend
           region: us-central1
           source: ./backend
+          timeout: 900
+          flags: --memory=1Gi --cpu=2 --concurrency=10
           env_vars: |
             GCP_PROJECT_ID=pe-dd-demo-03312257
             GCP_BUCKET_NAME=pe-dd-demo-03312257-reports
